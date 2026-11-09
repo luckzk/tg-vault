@@ -222,7 +222,17 @@
     "checkNow": "Check now",
     "checking": "Checking for updates…",
     "found": "TG Vault v{{version}} is available. You can view the release notes.",
-    "alreadyLatest": "TG Vault v{{version}} is up to date."
+    "alreadyLatest": "TG Vault v{{version}} is up to date.",
+    "applyNow": "Update now",
+    "applying": "Submitting update",
+    "applyStarted": "Update request submitted ({{job}}). It runs in the background; the service will briefly restart while containers are replaced.",
+    "applyFailed": "Could not submit the update",
+    "agentOffline": "The update agent is not installed, so one-click updates are unavailable.",
+    "manualCommand": "Update manually: cd tg-vault && ./deploy/install.sh",
+    "jobQueued": "waiting for the update agent",
+    "jobRunning": "Updating: {{step}}",
+    "jobDone": "Update completed",
+    "jobFailed": "Update failed"
   },
   "settings": {
     "title": "Settings",

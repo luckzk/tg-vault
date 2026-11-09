@@ -83,6 +83,14 @@ Web 与分片上传按原样接收文件名，`%20` 等字符不会作为 URL �
 | `SQL_LOG_ALL` | `false` | 全量 SQL 日志，仅排障时按需启用 |
 | `UPDATE_CHECK_ENABLED` | `true` | 是否向 GitHub 查询新版本；设为 `false` 关闭自动检测 |
 | `UPDATE_CHECK_REPOSITORY` | `hicocos/tg-vault` | 更新检测使用的公开 GitHub 仓库，格式为 `owner/repo` |
+| `UPDATE_DIR` | `/data/update` | 面板与更新代理之间的协议目录（请求/心跳/状态文件） |
+| `TG_VAULT_WITH_UPDATER` | — | 记入 `.env`：为 `true` 时安装器启动更新代理，面板可一键更新 |
+
+### 面板一键更新
+
+面板默认只有“检查更新”。一键更新需启用 host 侧的更新代理：`./deploy/install.sh --with-updater`（已有部署重跑一次安装器加该选项即可；选择记入 `.env` 的 `TG_VAULT_WITH_UPDATER=true`，以后更新时沿用）。代理平时不启动（Compose profile `updater`），面板后端只在共享的 `/data` 卷下写请求文件，真正的 git/compose 操作由代理执行，进度在「设置 → 版本信息」每 5 秒轮询展示。
+
+更新前不自动备份，请先按部署指南第 7 节备份；失败不自动回滚，只保留现场。工作树有本地修改、detached HEAD 或远端分支分叉时拒绝更新。Release 徽章只对有 Release 的仓库生效；fork 用户把 `UPDATE_CHECK_REPOSITORY` 改成自己的仓库（如 `luckzk/tg-vault`），分支快进更新不受徽章影响。安全提示：代理挂载 docker socket，等同于宿主机 root 权限，只在信任的管理员场景启用。完整说明见[部署指南](../deploy/DEPLOY.md#5-更新部署)。
 
 不要公开原始日志、请求头、数据库导出或调试归档。提供问题报告前，移除凭证、session、用户/聊天标识、文件名和私有服务器路径。
 

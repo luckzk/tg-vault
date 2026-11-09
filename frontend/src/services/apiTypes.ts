@@ -347,6 +347,25 @@ export interface TelegramBotPublicConfig {
     action: string | null;
 }
 
+export interface UpdateAgentState {
+    online: boolean;
+    lastHeartbeat: string | null;
+}
+
+export type UpdateJobState = 'queued' | 'running' | 'done' | 'failed';
+
+export interface UpdateJobStatus {
+    id: string;
+    state: UpdateJobState;
+    step: string | null;
+    startedAt: string | null;
+    finishedAt: string | null;
+    fromSha: string | null;
+    toSha: string | null;
+    error: string | null;
+    logTail: string[];
+}
+
 export interface UpdateStatus {
     enabled: boolean;
     currentVersion: string;
@@ -358,6 +377,8 @@ export interface UpdateStatus {
     checkedAt: string | null;
     stale: boolean;
     error: string | null;
+    agent?: UpdateAgentState | null;
+    job?: UpdateJobStatus | null;
 }
 
 export interface TelegramUserAccountStatus {

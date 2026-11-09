@@ -59,5 +59,7 @@ export const serviceErrors = {
   system: {
     getVersionFailed: 'Could not load version information', updateCheckRateLimited: 'Too many update checks. Try again later.',
     checkVersionFailed: 'Could not check for updates', healthCheckFailed: 'The health check failed',
+    updateApplyConflict: 'An update is already in progress', updateApplyRateLimited: 'Too many update requests. Try again in 10 minutes.',
+    applyUpdateFailed: 'Could not submit the update',
   },
 } as const;

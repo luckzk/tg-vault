@@ -168,6 +168,32 @@ services:
       - tg-vault-network
     restart: "no"
 
+  # 一键更新代理：默认不启动，需显式启用（见 deploy/DEPLOY.md 第 5 节）。
+  # 它挂载 docker socket，等同于宿主机 root 权限，只在信任的管理员场景启用。
+  # 面板后端只写 /data/update/request.json，真正的 git/compose 操作全部由它执行。
+  updater:
+    build:
+      context: ./deploy/updater
+    image: tg-vault-updater:local
+    container_name: tg-vault-updater
+    profiles:
+      - updater
+    environment:
+      - PROJECT_DIR=/project
+      - UPDATE_DIR=/data/update
+      - BACKEND_URL=http://backend:${PORT:-51947}/readyz
+      - COMPOSE_PROJECT_NAME=${COMPOSE_PROJECT_NAME:-tg-vault}
+      - DRY_RUN=${UPDATER_DRY_RUN:-0}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./:/project:rw
+      - type: ${LOCAL_STORAGE_MOUNT_TYPE:-volume}
+        source: ${LOCAL_STORAGE_SOURCE:-file-storage}
+        target: /data
+    networks:
+      - tg-vault-network
+    restart: unless-stopped
+
   # 数据库
   postgres:
     image: postgres@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685

@@ -759,6 +759,10 @@ class FileAPI {
         return systemClient.checkForUpdates();
     }
 
+    async applyUpdate(buildFromSource = false): Promise<{ jobId: string; state: string }> {
+        return systemClient.applyUpdate(buildFromSource);
+    }
+
     async testTelegramBotConfig(input: { botToken: string; apiId: string; apiHash: string }): Promise<{ success: boolean; bot: { username: string | null; displayName: string | null }; runtimeStarted: boolean }> {
         return this.telegramBotConfigRequest('/api/storage/config/telegram-bot/test', 'POST', input);
     }

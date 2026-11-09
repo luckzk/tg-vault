@@ -134,6 +134,33 @@ curl -fsSL https://raw.githubusercontent.com/hicocos/tg-vault/main/install.sh | 
 
 安装器从 `origin` 快进更新当前分支；有本地修改、detached HEAD 或无法快进时停止。原配置、数据库和文件挂载保留，不自动迁移数据。已手动更新、固定发布源码或离线部署可使用 `--skip-source-update`。
 
+### 面板一键更新
+
+面板只做“检查更新”，一键更新需要额外启用 host 侧的更新代理（updater）：
+
+```bash
+./deploy/install.sh --with-updater
+```
+
+已有部署重新运行一次安装器并加上该选项即可；选择记入 `.env` 的 `TG_VAULT_WITH_UPDATER=true`，以后更新时沿用。也可以只启动代理，不重跑安装器：
+
+```bash
+docker compose --profile updater up -d updater
+```
+
+架构：面板后端没有 docker socket、也没有宿主机 git/compose 访问权，所以它只在共享的 `/data` 卷下写 `/data/update/request.json`；updater 每 10 秒轮询，心跳写 `/data/update/heartbeat.json`，接单后执行更新并把进度写进 `/data/update/status.json`，面板每 5 秒轮询展示。updater 默认不启动（profile `updater`），启用时挂载 `/var/run/docker.sock` 与项目目录。
+
+执行步骤与手动跑安装器一致：预检（git 仓库、非 detached HEAD、树干净、可 fetch）→ 记录更新前 SHA 与镜像 → `git merge --ff-only origin/<当前分支>` → 拉取 latest 镜像（更新接口支持 `buildFromSource` 从源码构建，面板按钮默认用拉取模式）→ 校验前后端镜像属于同一源码修订 → 停旧应用 → 数据库 plan/migrate → 替换应用 → 等后端 `/readyz`（最长 5 分钟）并确认容器运行/健康。单次总超时 15 分钟。
+
+明确不做的事：
+
+- 更新前不自动备份。先按第 7 节做协调备份（`.env`、数据库、文件卷）。
+- 失败不自动回滚。只保留现场并在面板显示失败原因与日志尾部；回滚靠升级前备份 + 旧镜像（见本节开头）。
+- 工作树有本地修改、detached HEAD 或远端分支分叉时拒绝更新，不动容器。
+- Release 徽章只对有 Release 的仓库生效：fork 分支没有 Release 时徽章不亮，但更新按钮仍可做分支快进更新。fork 用户把 `.env` 的 `UPDATE_CHECK_REPOSITORY` 改成自己的仓库（如 `luckzk/tg-vault`）即可看到自己仓库的 Release。
+
+安全提示：updater 挂载 docker socket，等同于宿主机 root 权限，信任边界等同于面板管理员。只在面板管理员可信的场景启用；不需要一键更新时不要启动它（`docker compose stop updater`，或从 `.env` 删掉 `TG_VAULT_WITH_UPDATER`）。
+
 替换前后端会短暂中断服务；重启旧容器不会完成升级。迁移失败后保持应用停止，优先前向修复。回退前须验证旧镜像与 schema 的兼容性，必要时恢复升级前同一批数据库、文件与密钥，再运行匹配镜像。
 
 部署后检查：

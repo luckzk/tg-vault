@@ -6,7 +6,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { motion, AnimatePresence } from "framer-motion";
 import { createPortal } from "react-dom";
-import { Palette, Globe, Cloud, Database, CheckCircle, Trash2, Network, Shield, ShieldAlert, ShieldCheck, ExternalLink, KeyRound, CircleHelp, XCircle, RefreshCw, Gauge, Copy, X } from "../ui/icons";
+import { Palette, Globe, Cloud, Database, CheckCircle, Trash2, Network, Shield, ShieldAlert, ShieldCheck, ExternalLink, KeyRound, CircleHelp, XCircle, RefreshCw, Gauge, Copy, X, Download } from "../ui/icons";
 import { Button } from "../ui/Button";
 import { LanguageToggle } from "../ui/LanguageToggle";
 import { cn } from "../../lib/utils";
@@ -136,6 +136,7 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
     const [actionDialogInput, setActionDialogInput] = useState('');
     const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
     const [isCheckingUpdates, setIsCheckingUpdates] = useState(false);
+    const [isApplyingUpdate, setIsApplyingUpdate] = useState(false);
 
     const closeActionNotice = useCallback(() => {
         setActionNotice(null);
@@ -546,6 +547,44 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
     };
 
 
+    const handleApplyUpdate = async () => {
+        if (isApplyingUpdate) return;
+        setIsApplyingUpdate(true);
+        try {
+            const result = await fileApi.applyUpdate(false);
+            const status = await fileApi.getUpdateStatus();
+            setUpdateStatus(status);
+            window.dispatchEvent(new CustomEvent('tgvault:update-status', { detail: status }));
+            await showNotice(t('updates.applyStarted', { job: result.jobId.slice(0, 8) }));
+        } catch (error: unknown) {
+            await showNotice(errorMessage(error) || t('updates.applyFailed'), t('settings.remaining.copy.139'), 'error');
+        } finally {
+            setIsApplyingUpdate(false);
+        }
+    };
+
+    // 更新任务进行中时每 5 秒轮询一次状态，任务结束即停止。
+    const updateJobState = updateStatus?.job?.state;
+    useEffect(() => {
+        if (updateJobState !== 'queued' && updateJobState !== 'running') return;
+        const timer = window.setInterval(() => {
+            void (async () => {
+                try {
+                    const status = await fileApi.getUpdateStatus();
+                    setUpdateStatus(status);
+                    window.dispatchEvent(new CustomEvent('tgvault:update-status', { detail: status }));
+                    if (status.job?.state === 'done') await showNotice(t('updates.jobDone'));
+                    if (status.job?.state === 'failed') await showNotice(status.job.error || t('updates.jobFailed'), t('settings.remaining.copy.139'), 'error');
+                } catch {
+                    // 下次轮询再试。
+                }
+            })();
+        }, 5000);
+        return () => window.clearInterval(timer);
+        // showNotice 由组件内定义，轮询只依赖任务状态。
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [updateJobState]);
+
     // Load initial config
     useEffect(() => {
         const loadConfig = async () => {
@@ -743,7 +782,26 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
                                 {isCheckingUpdates ? <IndeterminateSpinner label={t('updates.checking')} size="sm" /> : <RefreshCw className="h-3.5 w-3.5" />}
                                 {t('updates.checkNow')}
                             </Button>
+                            <Button size="sm" disabled={isApplyingUpdate || updateStatus?.agent?.online !== true || updateJobState === 'queued' || updateJobState === 'running'} onClick={() => void handleApplyUpdate()}>
+                                {isApplyingUpdate || updateJobState === 'queued' || updateJobState === 'running' ? <IndeterminateSpinner label={t('updates.applying')} size="sm" /> : <Download className="h-3.5 w-3.5" />}
+                                {t('updates.applyNow')}
+                            </Button>
                     </div>
+                    {updateStatus?.agent && !updateStatus.agent.online && (
+                        <p className="settings-help">{t('updates.agentOffline')} {t('updates.manualCommand')}</p>
+                    )}
+                    {updateStatus?.job && (updateStatus.job.state === 'queued' || updateStatus.job.state === 'running') && (
+                        <p className="settings-help">
+                            {t('updates.jobRunning', { step: updateStatus.job.step || t('updates.jobQueued') })}
+                            {updateStatus.job.fromSha && updateStatus.job.toSha ? ` ${updateStatus.job.fromSha.slice(0, 7)} → ${updateStatus.job.toSha.slice(0, 7)}` : ''}
+                        </p>
+                    )}
+                    {updateStatus?.job?.state === 'done' && (
+                        <p className="settings-help">{t('updates.jobDone')}{updateStatus.job.fromSha && updateStatus.job.toSha ? ` ${updateStatus.job.fromSha.slice(0, 7)} → ${updateStatus.job.toSha.slice(0, 7)}` : ''}</p>
+                    )}
+                    {updateStatus?.job?.state === 'failed' && (
+                        <p className="settings-help">{t('updates.jobFailed')}{updateStatus.job.error ? `：${updateStatus.job.error}` : ''} {t('updates.manualCommand')}</p>
+                    )}
                 </div>
             </SettingsSection>
             </SettingsWorkspace>}

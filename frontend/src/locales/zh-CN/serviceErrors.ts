@@ -68,5 +68,6 @@ export const serviceErrors = {
   },
   system: {
     getVersionFailed: '获取版本信息失败', updateCheckRateLimited: '检查过于频繁，请稍后再试', checkVersionFailed: '检查版本失败', healthCheckFailed: '健康检查失败',
+    updateApplyConflict: '已有更新任务在进行中', updateApplyRateLimited: '更新请求过于频繁，请 10 分钟后再试', applyUpdateFailed: '提交更新失败',
   },
 } as const;

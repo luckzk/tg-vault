@@ -13,16 +13,18 @@ SKIP_SOURCE_UPDATE=false
 INSTALL_REQUIRE_ATTESTATIONS="${INSTALL_REQUIRE_ATTESTATIONS:-true}"
 INSTALL_FROM_SOURCE=false
 INSTALL_CHECK_BUILD=false
+WITH_UPDATER=false
 for argument in "$@"; do
 case "$argument" in
   --non-interactive) NON_INTERACTIVE=true ;;
   --after-source-update) AFTER_SOURCE_UPDATE=true ;;
   --skip-source-update) SKIP_SOURCE_UPDATE=true ;;
+  --with-updater) WITH_UPDATER=true ;;
   --compat) INSTALL_REQUIRE_ATTESTATIONS=false ;;
   --build) INSTALL_FROM_SOURCE=true; INSTALL_CHECK_BUILD=true ;;
   -h|--help)
     cat <<'EOF'
-用法：./deploy/install.sh [--non-interactive] [--skip-source-update] [--build] [--compat]
+用法：./deploy/install.sh [--non-interactive] [--skip-source-update] [--build] [--compat] [--with-updater]
 
 检查源码更新和服务器环境，再填写 Web/API 地址。仅输入 1 才授权安装缺少的软件。
 首次部署创建 .env 并生成密钥；已有地址按 Enter 保留。生产环境需配置 HTTPS。
@@ -31,6 +33,9 @@ case "$argument" in
 --skip-source-update  使用当前源码，不拉取 Git 更新。
 --build  跳过 latest 镜像拉取，强制使用当前源码构建。
 --compat  本次构建不生成 SBOM/provenance，适用于较旧 Compose/镜像存储；不改原配置。
+--with-updater  同时启动一键更新代理（面板“设置 → 版本信息”可一键更新；代理挂载
+  docker socket，等同宿主机 root 权限，仅在信任的管理员场景启用；选择记入 .env
+  的 TG_VAULT_WITH_UPDATER，以后更新时沿用）。
 EOF
     exit 0
     ;;
@@ -90,6 +95,7 @@ update_source() {
     reload_args+=(--after-source-update)
     [[ "$INSTALL_REQUIRE_ATTESTATIONS" != false ]] || reload_args+=(--compat)
     [[ "$INSTALL_FROM_SOURCE" != true ]] || reload_args+=(--build)
+    [[ "$WITH_UPDATER" != true ]] || reload_args+=(--with-updater)
     exec bash ./deploy/install.sh "${reload_args[@]}"
   fi
   echo "代码已是最新。"
@@ -328,6 +334,21 @@ STORAGE_CREDENTIALS_SECRET="$(read_env STORAGE_CREDENTIALS_SECRET)"
 export CORS_ORIGIN VITE_API_URL MCP_PUBLIC_URL DB_PASSWORD DB_PASSWORD_URI SESSION_SECRET STORAGE_CREDENTIALS_SECRET
 prepare_install_compose
 start_installation
+
+# 一键更新代理：只在本次显式要求或 .env 已记录时启动。代理挂载 docker socket，
+# 等同宿主机 root 权限；启动失败不影响已部署的主应用，只提示手动命令。
+if [[ "$WITH_UPDATER" == true ]]; then
+  upsert_env TG_VAULT_WITH_UPDATER true
+fi
+if [[ "$(read_env TG_VAULT_WITH_UPDATER)" == true ]]; then
+  echo "正在启动更新代理…"
+  if installer_compose --profile updater up -d updater; then
+    echo "更新代理已启动：面板“设置 → 版本信息”可一键更新。"
+  else
+    echo "警告：更新代理启动失败，面板一键更新不可用；手动更新仍可用。" >&2
+    echo "手动启动：docker compose --profile updater up -d updater" >&2
+  fi
+fi
 
 if [[ "$created_env" == true ]]; then
   echo "TG Vault 首次部署完成"
