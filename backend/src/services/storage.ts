@@ -27,6 +27,7 @@ import { DEFAULT_STORAGE_COOLDOWN_MS, STORAGE_COOLDOWN_REASON_DAILY_UPLOAD_LIMIT
 import { switchStorageAccountWithClient, switchStorageToLocalWithClient } from './storageAccountLifecycle.js';
 import { validateConfiguredStorageTarget } from './storageTargetReadiness.js';
 import { OpenListStorageProvider } from './openListStorage.js';
+import { RcloneStorageProvider, normalizeRcloneConfig } from './rcloneStorage.js';
 import { uploadGoogleDriveFile } from './googleDriveUpload.js';
 import { uploadOneDriveFile } from './oneDriveUpload.js';
 import { addAbortSignal } from 'node:stream';
@@ -1468,6 +1469,7 @@ export class StorageManager {
                 config.bucket, config.forcePathStyle || false);
             case 'webdav': return new WebDAVStorageProvider(id, config.url, config.username, config.password);
             case 'openlist': return new OpenListStorageProvider(id, config.baseUrl, config.rootPath || '/', config.username, config.password);
+            case 'rclone': return new RcloneStorageProvider(id, config);
             case 'google_drive': return new GoogleDriveStorageProvider(id, config.clientId, config.clientSecret, config.refreshToken,
                 config.redirectUri, config.sharedDriveId);
             default: return null;
@@ -1913,6 +1915,30 @@ export class StorageManager {
 
         const openList = new OpenListStorageProvider(targetId, baseUrl, rootPath, username, password);
         this.providers.set(`openlist:${targetId}`, openList);
+        return targetId;
+    }
+
+    async addRcloneAccount(name: string, configInput: unknown) {
+        const config = normalizeRcloneConfig(configInput);
+        const candidate = new RcloneStorageProvider(`probe-${randomUUID()}`, config);
+        try {
+            await candidate.probe();
+        } finally {
+            await candidate.dispose().catch(() => undefined);
+        }
+        const storedConfig = JSON.stringify(encryptStorageConfig({ ...config }));
+
+        const res = await query(
+            `INSERT INTO storage_accounts (type, name, config, is_active, last_probe_status, last_probe_error, last_probed_at)
+             VALUES ($1, $2, $3, $4, 'available', NULL, NOW()) RETURNING id`,
+            ['rclone', name, storedConfig, false]
+        );
+        const targetId = res.rows[0].id;
+        console.log(`[StorageManager] Added new Rclone account: ${targetId}`);
+
+        const rclone = new RcloneStorageProvider(targetId, config);
+        this.providers.set(`rclone:${targetId}`, rclone);
+
         return targetId;
     }
 

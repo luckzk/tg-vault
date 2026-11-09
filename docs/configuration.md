@@ -77,6 +77,7 @@ Web 与分片上传按原样接收文件名，`%20` 等字符不会作为 URL �
 | `STORAGE_PROBE_TIMEOUT_MS` | `15000` | 存储探测超时 |
 | `WEBDAV_INACTIVITY_TIMEOUT_MS` | `300000` | WebDAV 无活动超时 |
 | `WEBDAV_UPLOAD_TIMEOUT_MS` | `21600000` | WebDAV 上传总超时，默认 6 小时 |
+| `RCLONE_CONFIG_DIR` | `/data/rclone` | Rclone 账户配置物化目录；每个账户一份 0600 权限的 rclone.conf，凭证不进命令行、环境变量或日志 |
 | `LOG_LEVEL` | `info` | 应用日志级别 |
 | `SQL_LOG_SLOW_MS` | `500` | 慢查询日志阈值 |
 | `SQL_LOG_ALL` | `false` | 全量 SQL 日志，仅排障时按需启用 |
@@ -183,8 +184,20 @@ Bot 支持自动重连，也可在设置页按当前状态重新连接；个人�
 - **OSS / S3**：准备 bucket、region、访问密钥；S3 还需公网 HTTPS API endpoint，按服务商要求选择 path-style，R2 region 填 `auto`。请求由后端发起，无需为本站配置桶 CORS；当前表单不接受 STS 第三段令牌。使用仅覆盖所需 bucket 的最小权限凭证。
 - **WebDAV**：填写 DAV endpoint；仅匿名服务可省略用户名和密码，普通服务填写提供商应用口令。自动协商 Basic / Digest 认证，正确凭据无需额外选择认证方式。默认拒绝不安全或私有地址；WebDAV 内网开关不放宽 S3 / OpenList 原生接入，不忽略 TLS 证书错误。
 - **OpenList**：先在 OpenList 挂载好可写目录，填写站点根地址、虚拟根目录及专用 OpenList 用户名 / 密码；不是背后云盘账号，不追加 `/dav`。原生 API 添加时验证写入，不支持游客、手填 Token 或交互式二次验证。
+- **Rclone / Drime**：见下节。添加时先探测连接，失败不入库；Token 加密保存，不回显。
 
 OAuth 提供方登记的 redirect URI 必须与 Web 设置页显示的一致：OneDrive 默认 `https://api.example.com/api/storage/onedrive/callback`，Google Drive 默认 `https://api.example.com/api/storage/google-drive/callback`。改域名时同步修改提供方登记与部署配置。远端存储凭证保存在数据库中并依赖应用密钥解密；本地备份不包含远端对象，远端文件需按提供方另行备份。
+
+### Rclone / Drime
+
+Rclone 存储通过服务器上的 `rclone` 命令行（生产镜像已内置 rclone 1.76.0，≥ 1.73 才有官方 Drime 后端）访问远端网盘，不走任何第三方中转。
+
+- **Drime Token**：在 Drime 网页端「设置 → Developer」创建 API Token；上传需要 **All** 权限，Read Only 只能下载。Token 只存于加密的账户配置，运行时物化为每账户一份 0600 权限的 `rclone.conf`，永不出现在命令行、环境变量、日志或 API 返回中。示例一律写 `YOUR_DRIME_API_TOKEN`，不要填真实 Token。
+- **两种模式**：「Drime（内置）」只需填 Token（可再填 Workspace ID、根目录 ID）；「自定义 rclone.conf」粘贴完整配置文件，须包含与远端名称一致的 `[名称]` 一节，可用于 rclone 支持的其他后端。远端名称只支持字母、数字、下划线、连字符；基础路径是远端根目录下的相对路径，不允许 `..`。
+- **流式保证**：Telegram 下载到 Rclone 账户时，文件以单流顺序经 `rclone rcat` 直接写入远端临时对象 `.uploading-<uuid>-<文件名>`，**不写本地临时文件、不做磁盘预留**；写满后按大小校验临时文件，再服务端改名（`moveto`，不重新上传）为正式文件并再次按大小校验。Drime 不提供 hash 与 mtime，校验只能按大小。文件名最长 255 字节 UTF-8。
+- **失败语义**：流式传输无断点续传，失败从头重传；`.uploading-` 临时文件尽力清理，改名后大小不符时不擅自删除正式文件，留待人工核对。Vault 中的文件 API Token 访问不到。
+- **大文件**：`rcat` 未知大小时按 5 MiB 分片、最多 10000 片，默认流式上限 48 GiB；已知大小时按需调大 `--drime-chunk-size`（总大小 / 9000 片，至少 5 MiB），超过 48 GiB 的文件会自动调大分片以保证片数不超限；上传并发固定为 2 以控制内存占用。
+- **Web 上传仍先落盘**：只有 Telegram 下载走流式；浏览器上传、分片上传、qBittorrent 转存仍先写本地临时文件，再由 `rclone copyto` 上传（同样按大小校验）。
 
 授权时允许浏览器打开弹窗；请求失败后重新发起授权，不要复制或分享回调 URL。公网 IPv6 字面地址可用作存储端点，内网、回环与保留 IPv6 地址仍拒绝。
 

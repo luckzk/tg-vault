@@ -12,6 +12,7 @@ const PROVIDERS: Record<string, ProviderMetadata> = {
     s3: { id: 's3', label: 'S3 存储', emoji: '📦' },
     webdav: { id: 'webdav', label: 'WebDAV', emoji: '🌐' },
     openlist: { id: 'openlist', label: 'OpenList', emoji: '🗂️' },
+    rclone: { id: 'rclone', label: 'Rclone', emoji: '☁️' },
 };
 
 export function getProviderMetadata(providerId: string): ProviderMetadata {

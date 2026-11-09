@@ -12,6 +12,7 @@ const PROVIDER_FIELDS: Record<string, ProviderFields> = {
     aliyun_oss: { fields: ['region', 'bucket'], secrets: ['accessKeyId', 'accessKeySecret', 'securityToken'] },
     webdav: { fields: ['url', 'username'], secrets: ['password'] },
     openlist: { fields: ['baseUrl', 'rootPath', 'username'], secrets: ['password', 'token'] },
+    rclone: { fields: ['mode', 'remoteName', 'basePath', 'workspaceId', 'rootFolderId'], secrets: ['accessToken', 'rcloneConfigText'] },
 };
 const URL_FIELDS: Record<string, true> = { endpoint: true, redirectUri: true, url: true, baseUrl: true };
 
@@ -22,6 +23,7 @@ const EDITABLE_CREDENTIALS: Record<string, readonly string[]> = {
     aliyun_oss: ['accessKeyId', 'accessKeySecret'],
     webdav: ['username', 'password'],
     openlist: ['username', 'password'],
+    rclone: ['accessToken', 'rcloneConfigText'],
 };
 
 export function editableStorageCredentials(provider: string): readonly string[] {

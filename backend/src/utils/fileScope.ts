@@ -2,7 +2,7 @@ import path from 'path';
 import { query } from '../db/index.js';
 import { safeUnlink, isPathInside } from './localPath.js';
 
-export const CLOUD_SOURCES = new Set(['onedrive', 'aliyun_oss', 's3', 'webdav', 'openlist', 'google_drive']);
+export const CLOUD_SOURCES = new Set(['onedrive', 'aliyun_oss', 's3', 'webdav', 'openlist', 'google_drive', 'rclone']);
 
 const UPLOAD_DIR = path.resolve(process.env.UPLOAD_DIR || './data/uploads');
 const THUMBNAIL_DIR = path.resolve(process.env.THUMBNAIL_DIR || './data/thumbnails');

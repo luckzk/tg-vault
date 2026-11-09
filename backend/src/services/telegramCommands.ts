@@ -67,7 +67,7 @@ import { DOWNLOAD_WORKER_OPTIONS, normalizeTelegramDownloadWorkers } from '../ut
 
 // ESM compatibility
 const checkDiskSpace = (checkDiskSpaceModule as any).default || checkDiskSpaceModule;
-const STORAGE_TYPE_ORDER = ['local', 'onedrive', 'google_drive', 'aliyun_oss', 's3', 'webdav'];
+const STORAGE_TYPE_ORDER = ['local', 'onedrive', 'google_drive', 'aliyun_oss', 's3', 'webdav', 'rclone'];
 const ON_VALUES = new Set(['1', 'true', 'yes', 'on']);
 const UPLOAD_DIR = process.env.UPLOAD_DIR || './data/uploads';
 const THUMBNAIL_DIR = process.env.THUMBNAIL_DIR || './data/thumbnails';

@@ -1074,6 +1074,28 @@ router.post('/config/openlist', requireAuth, async (req: Request, res: Response)
     }
 });
 
+// 添加 Rclone 存储配置（Drime 内置模式或自定义 rclone.conf）。写入前先探测，失败不入库。
+router.post('/config/rclone', requireAuth, async (req: Request, res: Response) => {
+    try {
+        const { name, mode, remoteName, basePath, accessToken, workspaceId, rootFolderId, rcloneConfigText } = req.body || {};
+        if (!name || typeof name !== 'string' || !name.trim()) {
+            return res.status(400).json({ error: '缺少必要参数（名称）' });
+        }
+        const { storageManager } = await import('../services/storage.js');
+        const accountId = await storageManager.addRcloneAccount(String(name).trim(), {
+            mode, remoteName, basePath, accessToken, workspaceId, rootFolderId, rcloneConfigText,
+        });
+        res.json({ success: true, message: 'Rclone 存储账户已添加', accountId });
+    } catch (error) {
+        const message = String((error as Error)?.message || '');
+        if (/Rclone 模式只支持|远端名称只支持|基础路径|Drime 模式需要|Drime API Token|自定义模式需要|rclone\.conf/.test(message)) {
+            return res.status(400).json({ error: message });
+        }
+        console.error('添加 Rclone 配置失败:', error);
+        sendStorageOperationError(res, error, '添加 Rclone 配置失败');
+    }
+});
+
 // 切换存储提供商或具体账户
 router.post('/switch', requireAuth, async (req: Request, res: Response) => {
     try {
@@ -1083,7 +1105,7 @@ router.post('/switch', requireAuth, async (req: Request, res: Response) => {
         if (provider === 'local') {
             await storageManager.switchToLocal();
             return res.json({ success: true, message: '已切换到本地存储。该系统默认值只影响后续新任务，已提交任务目标保持不变。', scope: 'global_default', inFlightTargetsPreserved: true });
-        } else if (provider === 'onedrive' || provider === 'aliyun_oss' || provider === 's3' || provider === 'webdav' || provider === 'openlist' || provider === 'google_drive') {
+        } else if (provider === 'onedrive' || provider === 'aliyun_oss' || provider === 's3' || provider === 'webdav' || provider === 'openlist' || provider === 'google_drive' || provider === 'rclone') {
             if (accountId) {
                 await storageManager.switchAccount(accountId);
                 return res.json({ success: true, message: `已切换 ${provider} 账户。该系统默认值只影响后续新任务，已提交任务目标保持不变。`, scope: 'global_default', inFlightTargetsPreserved: true });

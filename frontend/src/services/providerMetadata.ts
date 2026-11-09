@@ -15,6 +15,7 @@ const providers: Record<string, ProviderMetadata> = {
     s3: { id: 's3', label: 'S3', icon: Package },
     webdav: { id: 'webdav', label: 'WebDAV', icon: Network },
     openlist: { id: 'openlist', label: 'OpenList', icon: Server },
+    rclone: { id: 'rclone', label: 'Rclone', icon: Cloud },
 };
 
 export function getProviderMetadata(provider?: string | null): ProviderMetadata {

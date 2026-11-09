@@ -12,6 +12,22 @@ export interface PreparedStorageWrite {
     save(signal?: AbortSignal, onProgress?: StorageUploadProgress): Promise<string>;
 }
 
+/** A remote object written incrementally without touching local disk. */
+export interface StorageUploadStream {
+    /** Final remote path once finish() succeeds. */
+    storedPath: string;
+    /** Remote temporary path used while the stream is open. */
+    tempPath: string;
+    bytesWritten: number;
+    write(chunk: Buffer): Promise<void>;
+    finish(): Promise<string>;
+    abort(): Promise<void>;
+}
+
+export interface StorageUploadStreamOptions {
+    signal?: AbortSignal;
+}
+
 export interface IStorageProvider {
     id?: string; // 对于云盘，这是账户 ID
     name: string;
@@ -29,6 +45,14 @@ export interface IStorageProvider {
     saveFile(tempPath: string, fileName: string, mimeType: string, folder?: string | null, options?: StorageWriteOptions): Promise<string>;
     /** Allocates a stable object identity before any upload side effect. */
     prepareSaveFile?(tempPath: string, fileName: string, mimeType: string, folder?: string | null): Promise<PreparedStorageWrite>;
+
+    /**
+     * Opens a streaming upload that never lands on local disk. The caller feeds
+     * exactly totalBytes in order, then finish() renames the remote temporary
+     * object to its final path. Only providers that implement this can be used
+     * for zero-local-disk transfers.
+     */
+    openUploadStream?(fileName: string, mimeType: string, folder: string | null | undefined, totalBytes: number, options?: StorageUploadStreamOptions): Promise<StorageUploadStream>;
 
     /**
      * 获取文件流（用于下载）

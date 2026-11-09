@@ -29,6 +29,17 @@ WORKDIR /app
 # 安装 sharp 需要的依赖 和 ffmpeg (用于视频处理)
 RUN apk add --no-cache vips-dev ffmpeg ca-certificates curl
 
+# 安装 rclone（固定版本；>= 1.73 才有官方 Drime 后端）。官方 tarball 按目标架构安装，
+# 仅进生产镜像；装完自检版本号。
+ARG TARGETARCH
+RUN apk add --no-cache unzip \
+    && curl -fsSL "https://downloads.rclone.org/v1.76.0/rclone-v1.76.0-linux-${TARGETARCH}.zip" -o /tmp/rclone.zip \
+    && unzip -o /tmp/rclone.zip -d /tmp/rclone \
+    && install -m 0755 "/tmp/rclone/rclone-v1.76.0-linux-${TARGETARCH}/rclone" /usr/local/bin/rclone \
+    && rm -rf /tmp/rclone /tmp/rclone.zip \
+    && apk del unzip \
+    && rclone version
+
 # 复制依赖
 COPY package*.json ./
 RUN apk add --no-cache --virtual .native-build-deps python3 make g++ \

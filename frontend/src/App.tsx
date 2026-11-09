@@ -1128,6 +1128,7 @@ function App() {
     s3: 'S3',
     webdav: 'WebDAV',
     openlist: 'OpenList',
+    rclone: 'Rclone',
   }), [t]);
 
   const activeStorageDisplay = useMemo(() => {

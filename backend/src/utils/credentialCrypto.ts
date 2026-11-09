@@ -9,6 +9,8 @@ const SENSITIVE_CONFIG_KEYS = new Set([
     'accessKeySecret',
     'password',
     'username',
+    'accessToken',
+    'rcloneConfigText',
 ]);
 
 const SENSITIVE_SETTING_KEYS: Record<string, true> = {

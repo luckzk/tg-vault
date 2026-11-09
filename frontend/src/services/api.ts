@@ -966,8 +966,16 @@ class FileAPI {
         return postStorageAccount('/api/storage/config/openlist', { name, baseUrl, rootPath, username, password }, 'OpenList');
     }
 
+    // 添加 Rclone 存储账户
+    async addRcloneAccount(name: string, config: {
+        mode?: 'drime' | 'config'; remoteName?: string; basePath?: string;
+        accessToken?: string; workspaceId?: string; rootFolderId?: string; rcloneConfigText?: string;
+    }): Promise<{ success: boolean; message: string; accountId: string }> {
+        return postStorageAccount('/api/storage/config/rclone', { name, ...config }, 'Rclone');
+    }
+
     // 切换存储提供商或账户
-    async switchStorageProvider(provider: 'local' | 'onedrive' | 'aliyun_oss' | 's3' | 'webdav' | 'openlist' | 'google_drive', accountId?: string): Promise<{ success: boolean; message: string; scope?: string; inFlightTargetsPreserved?: boolean }> {
+    async switchStorageProvider(provider: 'local' | 'onedrive' | 'aliyun_oss' | 's3' | 'webdav' | 'openlist' | 'google_drive' | 'rclone', accountId?: string): Promise<{ success: boolean; message: string; scope?: string; inFlightTargetsPreserved?: boolean }> {
         const response = await apiRequest(`${API_BASE}/api/storage/switch`, {
             credentials: 'include',
             method: 'POST',

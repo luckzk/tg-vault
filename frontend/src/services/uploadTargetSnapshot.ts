@@ -1,7 +1,7 @@
 import type { StorageAccount, StorageConfig, UploadTargetSnapshot } from './api.js';
 import { tr } from '../i18n/runtime';
 
-export const STORAGE_PROVIDER_IDS = ['local', 'onedrive', 'google_drive', 'aliyun_oss', 's3', 'webdav', 'openlist'] as const;
+export const STORAGE_PROVIDER_IDS = ['local', 'onedrive', 'google_drive', 'aliyun_oss', 's3', 'webdav', 'openlist', 'rclone'] as const;
 export type StorageProviderId = typeof STORAGE_PROVIDER_IDS[number];
 
 type UploadStorageConfig = {
