@@ -232,7 +232,12 @@
     "jobQueued": "waiting for the update agent",
     "jobRunning": "Updating: {{step}}",
     "jobDone": "Update completed",
-    "jobFailed": "Update failed"
+    "jobFailed": "Update failed",
+    "buildFromSource": "Build update from source",
+    "buildFromSourceOn": "Build from source enabled",
+    "buildFromSourceOff": "Build from source disabled",
+    "buildFromSourceOnHint": "On: builds the update from the current branch source. Slower, but keeps fork changes.",
+    "buildFromSourceOffHint": "Off: pulls the upstream latest images. Faster, but drops fork changes."
   },
   "settings": {
     "title": "Settings",

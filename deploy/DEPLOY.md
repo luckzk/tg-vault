@@ -150,7 +150,7 @@ docker compose --profile updater up -d updater
 
 架构：面板后端没有 docker socket、也没有宿主机 git/compose 访问权，所以它只在共享的 `/data` 卷下写 `/data/update/request.json`；updater 每 10 秒轮询，心跳写 `/data/update/heartbeat.json`，接单后执行更新并把进度写进 `/data/update/status.json`，面板每 5 秒轮询展示。updater 默认不启动（profile `updater`），启用时挂载 `/var/run/docker.sock` 与项目目录。
 
-执行步骤与手动跑安装器一致：预检（git 仓库、非 detached HEAD、树干净、可 fetch）→ 记录更新前 SHA 与镜像 → `git merge --ff-only origin/<当前分支>` → 拉取 latest 镜像（更新接口支持 `buildFromSource` 从源码构建，面板按钮默认用拉取模式）→ 校验前后端镜像属于同一源码修订 → 停旧应用 → 数据库 plan/migrate → 替换应用 → 等后端 `/readyz`（最长 5 分钟）并确认容器运行/健康。单次总超时 15 分钟。
+执行步骤与手动跑安装器一致：预检（git 仓库、非 detached HEAD、树干净、可 fetch）→ 记录更新前 SHA 与镜像 → `git merge --ff-only origin/<当前分支>` → 按版本区的“从源码构建更新”开关拉取 latest 镜像或从源码构建 → 校验前后端镜像属于同一源码修订 → 停旧应用 → 数据库 plan/migrate → 替换应用 → 等后端 `/readyz`（最长 5 分钟）并确认容器运行/健康。单次总超时 15 分钟。开关默认值按版本检查的仓库名取：仓库不是上游 `hicocos/tg-vault` 时默认开，否则默认关；可手动拨动。注意 `UPDATE_CHECK_REPOSITORY` 只决定版本检查查哪个仓库的 Release，不影响更新拉取哪个镜像——fork 部署不要以为改了它就安全，起决定作用的是这个开关。
 
 明确不做的事：
 

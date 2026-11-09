@@ -22,6 +22,7 @@ import { StorageSettings } from './StorageSettings';
 import { SettingsField, SettingsFormLayout, SettingsRow, SettingsSection, SettingsWorkspace } from "./SettingsPresentation";
 import { QbittorrentSettings } from './QbittorrentSettings';
 import { McpSettings } from './McpSettings';
+import { shouldDefaultBuildFromSource } from './updateBuildMode';
 
 interface SettingsPageProps {
     storageStats?: StorageStats | null;
@@ -137,6 +138,10 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
     const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
     const [isCheckingUpdates, setIsCheckingUpdates] = useState(false);
     const [isApplyingUpdate, setIsApplyingUpdate] = useState(false);
+    // 用户手动拨动开关前，按版本检查的仓库名取默认值：非上游仓库（fork 部署）
+    // 默认从源码构建，拉取模式会拉到上游 latest 镜像、丢掉 fork 改动。
+    const [buildFromSourceOverride, setBuildFromSourceOverride] = useState<boolean | null>(null);
+    const buildFromSource = buildFromSourceOverride ?? shouldDefaultBuildFromSource(updateStatus?.repository);
 
     const closeActionNotice = useCallback(() => {
         setActionNotice(null);
@@ -551,7 +556,7 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
         if (isApplyingUpdate) return;
         setIsApplyingUpdate(true);
         try {
-            const result = await fileApi.applyUpdate(false);
+            const result = await fileApi.applyUpdate(buildFromSource);
             const status = await fileApi.getUpdateStatus();
             setUpdateStatus(status);
             window.dispatchEvent(new CustomEvent('tgvault:update-status', { detail: status }));
@@ -786,6 +791,24 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
                                 {isApplyingUpdate || updateJobState === 'queued' || updateJobState === 'running' ? <IndeterminateSpinner label={t('updates.applying')} size="sm" /> : <Download className="h-3.5 w-3.5" />}
                                 {t('updates.applyNow')}
                             </Button>
+                    </div>
+                    <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                        <div className="min-w-0">
+                            <p className="text-[13px] font-medium">{t('updates.buildFromSource')}</p>
+                            <p className="mt-1 text-[12px] leading-5 text-muted-foreground">{t(buildFromSource ? 'updates.buildFromSourceOnHint' : 'updates.buildFromSourceOffHint')}</p>
+                        </div>
+                        <button
+                            type="button"
+                            role="switch"
+                            aria-checked={buildFromSource}
+                            aria-label={t('updates.buildFromSource')}
+                            onClick={() => setBuildFromSourceOverride(!buildFromSource)}
+                            disabled={isApplyingUpdate || updateJobState === 'queued' || updateJobState === 'running'}
+                            className="settings-switch-target shrink-0 disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                            <span aria-hidden="true" className={cn('settings-switch-track', buildFromSource && 'is-enabled')}><span /></span>
+                            <span className="sr-only">{t(buildFromSource ? 'updates.buildFromSourceOn' : 'updates.buildFromSourceOff')}</span>
+                        </button>
                     </div>
                     {updateStatus?.agent && !updateStatus.agent.online && (
                         <p className="settings-help">{t('updates.agentOffline')} {t('updates.manualCommand')}</p>

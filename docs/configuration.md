@@ -90,7 +90,7 @@ Web 与分片上传按原样接收文件名，`%20` 等字符不会作为 URL �
 
 面板默认只有“检查更新”。一键更新需启用 host 侧的更新代理：`./deploy/install.sh --with-updater`（已有部署重跑一次安装器加该选项即可；选择记入 `.env` 的 `TG_VAULT_WITH_UPDATER=true`，以后更新时沿用）。代理平时不启动（Compose profile `updater`），面板后端只在共享的 `/data` 卷下写请求文件，真正的 git/compose 操作由代理执行，进度在「设置 → 版本信息」每 5 秒轮询展示。
 
-更新前不自动备份，请先按部署指南第 7 节备份；失败不自动回滚，只保留现场。工作树有本地修改、detached HEAD 或远端分支分叉时拒绝更新。Release 徽章只对有 Release 的仓库生效；fork 用户把 `UPDATE_CHECK_REPOSITORY` 改成自己的仓库（如 `luckzk/tg-vault`），分支快进更新不受徽章影响。安全提示：代理挂载 docker socket，等同于宿主机 root 权限，只在信任的管理员场景启用。完整说明见[部署指南](../deploy/DEPLOY.md#5-更新部署)。
+更新前不自动备份，请先按部署指南第 7 节备份；失败不自动回滚，只保留现场。工作树有本地修改、detached HEAD 或远端分支分叉时拒绝更新。版本区有“从源码构建更新”开关：开时 updater 从当前分支源码构建镜像（慢一点，但保留 fork 改动），关时拉取上游 latest 镜像（快，但会丢掉 fork 改动）。开关默认值按版本检查的仓库名取：仓库不是上游 `hicocos/tg-vault` 时默认开，否则默认关；可手动拨动。`UPDATE_CHECK_REPOSITORY` 只决定版本检查查哪个仓库的 Release，不影响更新拉取哪个镜像——fork 部署不要以为改了它就安全，起决定作用的是这个开关。Release 徽章只对有 Release 的仓库生效；fork 用户把 `UPDATE_CHECK_REPOSITORY` 改成自己的仓库（如 `luckzk/tg-vault`），分支快进更新不受徽章影响。安全提示：代理挂载 docker socket，等同于宿主机 root 权限，只在信任的管理员场景启用。完整说明见[部署指南](../deploy/DEPLOY.md#5-更新部署)。
 
 不要公开原始日志、请求头、数据库导出或调试归档。提供问题报告前，移除凭证、session、用户/聊天标识、文件名和私有服务器路径。
 

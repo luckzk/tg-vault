@@ -23,6 +23,7 @@ export interface PersistedUpdateState {
 
 export interface UpdateStatus {
     enabled: boolean;
+    repository: string;
     currentVersion: string;
     latestVersion: string | null;
     updateAvailable: boolean;
@@ -147,10 +148,11 @@ export function createPostgresUpdateCheckStore(runQuery: RunQuery = query): Upda
     };
 }
 
-function buildStatus(currentVersion: string, enabled: boolean, state: PersistedUpdateState | null, stale: boolean, error: string | null): UpdateStatus {
+function buildStatus(currentVersion: string, enabled: boolean, repository: string, state: PersistedUpdateState | null, stale: boolean, error: string | null): UpdateStatus {
     const release = state?.release || null;
     return {
         enabled,
+        repository,
         currentVersion,
         latestVersion: release?.version || null,
         updateAvailable: Boolean(release && compareVersions(release.version, currentVersion) > 0),
@@ -196,7 +198,7 @@ export function createUpdateChecker(options: UpdateCheckerOptions): UpdateChecke
     let transientError: string | null = null;
     let inFlight: Promise<UpdateStatus> | null = null;
 
-    const getStatus = async () => buildStatus(currentVersion, enabled, await store.loadState(), Boolean(transientError), transientError);
+    const getStatus = async () => buildStatus(currentVersion, enabled, repository, await store.loadState(), Boolean(transientError), transientError);
 
     const deliverPendingBotNotifications = async (): Promise<number> => {
         if (!enabled || !options.sendBotMessage) return 0;
@@ -249,7 +251,7 @@ export function createUpdateChecker(options: UpdateCheckerOptions): UpdateChecke
             }
             await store.saveState(stateAfterCheck);
             transientError = null;
-            const status = buildStatus(currentVersion, enabled, stateAfterCheck, false, null);
+            const status = buildStatus(currentVersion, enabled, repository, stateAfterCheck, false, null);
             await deliverPendingBotNotifications().catch(error => {
                 console.warn('版本通知投递失败:', error instanceof Error ? error.message : String(error));
             });

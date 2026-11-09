@@ -232,7 +232,12 @@
     "jobQueued": "等待更新代理接单",
     "jobRunning": "正在更新：{{step}}",
     "jobDone": "更新完成",
-    "jobFailed": "更新失败"
+    "jobFailed": "更新失败",
+    "buildFromSource": "从源码构建更新",
+    "buildFromSourceOn": "已开启从源码构建更新",
+    "buildFromSourceOff": "已关闭从源码构建更新",
+    "buildFromSourceOnHint": "开：从当前分支源码构建更新，慢一点，但保留 fork 改动。",
+    "buildFromSourceOffHint": "关：拉取上游 latest 镜像，快，但会丢掉 fork 改动。"
   },
   "settings": {
     "title": "设置",

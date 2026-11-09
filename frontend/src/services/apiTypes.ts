@@ -368,6 +368,7 @@ export interface UpdateJobStatus {
 
 export interface UpdateStatus {
     enabled: boolean;
+    repository?: string | null;
     currentVersion: string;
     latestVersion: string | null;
     updateAvailable: boolean;
