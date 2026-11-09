@@ -17,6 +17,10 @@ import { trackUploadProgress } from './storage/uploadProgress.js';
  *
  * Drime cannot report hashes or mtimes, so every size-sensitive step verifies
  * by byte count only. Vault files are not reachable with an API token.
+ *
+ * Drime throttles aggressively (a second consecutive listing can already 429),
+ * so every rclone invocation goes through RCLONE_PACING_ARGS: at most 2 API
+ * transactions per second with no burst, plus backoff retries.
  */
 
 export interface RcloneStorageConfig {
@@ -36,6 +40,15 @@ const MAX_SEGMENT_BYTES = 255;
 const RCLONE_MAX_PARTS = 9000;
 const RCLONE_MIN_CHUNK_MIB = 5;
 const STDERR_TAIL_BYTES = 64 * 1024;
+
+/**
+ * Drime 429 节流（2026-11-09 实测：`lsf` 成功后紧接着的 `lsd` 即 429，
+ * Drime 未公开具体限流数字）。所有经 runRclone 发起的调用共用这组参数：
+ * --tpslimit 2 --tpslimit-burst 1：单进程内每秒最多 2 次 API 事务且不突发；
+ * --retries 3 --retries-sleep 5s：整操作失败后退避重试。
+ * 注意 --tpslimit 只约束单个 rclone 进程内，跨进程的突发仍靠重试兜底。
+ */
+const RCLONE_PACING_ARGS = ['--tpslimit', '2', '--tpslimit-burst', '1', '--retries', '3', '--retries-sleep', '5s'];
 
 export function normalizeRcloneConfig(input: unknown): RcloneStorageConfig {
     if (!input || typeof input !== 'object' || Array.isArray(input)) {
@@ -236,7 +249,7 @@ export class RcloneStorageProvider implements IStorageProvider {
         const configPath = await this.ensureConfigFile();
         options.signal?.throwIfAborted();
         const child: ChildProcess = spawn(
-            'rclone', ['--config', configPath, ...args],
+            'rclone', ['--config', configPath, ...RCLONE_PACING_ARGS, ...args],
             { stdio: ['ignore', 'pipe', 'pipe'] },
         );
         let stdoutTail: Buffer = Buffer.alloc(0);
@@ -299,7 +312,7 @@ export class RcloneStorageProvider implements IStorageProvider {
     private async ensureRemoteDirectory(storedPath: string): Promise<void> {
         const dir = this.remoteDirPath(storedPath);
         if (!dir) return;
-        const result = await this.runRclone(['mkdir', dir, '--retries', '1', '--low-level-retries', '1'], { timeoutMs: 60_000 });
+        const result = await this.runRclone(['mkdir', dir, '--low-level-retries', '1'], { timeoutMs: 90_000 });
         if (result.code !== 0) {
             throw new RcloneError(this.describeFailure('创建远端目录', result.code, result.stderr), result.code);
         }
@@ -310,8 +323,8 @@ export class RcloneStorageProvider implements IStorageProvider {
         const target = `${this.config.remoteName}:${base}`;
         try {
             const result = await this.runRclone(
-                ['lsd', target, '--max-depth', '1', '--retries', '1', '--low-level-retries', '1'],
-                { timeoutMs: 20_000 },
+                ['lsd', target, '--max-depth', '1', '--low-level-retries', '1'],
+                { timeoutMs: 90_000 },
             );
             if (result.code === 0) return;
             if (result.code === 3 || result.code === 4) {
@@ -319,8 +332,8 @@ export class RcloneStorageProvider implements IStorageProvider {
                 // it). Fall back to the remote root: reachable root means the
                 // credentials work; a missing base is not an auth failure.
                 const root = await this.runRclone(
-                    ['lsd', `${this.config.remoteName}:`, '--max-depth', '1', '--retries', '1', '--low-level-retries', '1'],
-                    { timeoutMs: 20_000 },
+                    ['lsd', `${this.config.remoteName}:`, '--max-depth', '1', '--low-level-retries', '1'],
+                    { timeoutMs: 90_000 },
                 );
                 if (root.code === 0) return;
                 throw new RcloneError(this.describeFailure('连接测试（远端根目录）', root.code, root.stderr), root.code);
@@ -336,8 +349,8 @@ export class RcloneStorageProvider implements IStorageProvider {
     async fileExists(fileName: string, folder?: string | null): Promise<boolean> {
         const storedPath = joinStoredPath(folder, fileName);
         const result = await this.runRclone(
-            ['lsjson', '--stat', this.remotePath(storedPath), '--retries', '1', '--low-level-retries', '1'],
-            { timeoutMs: 60_000 },
+            ['lsjson', '--stat', this.remotePath(storedPath), '--low-level-retries', '1'],
+            { timeoutMs: 90_000 },
         );
         if (result.code === 0) return true;
         if (result.code === 3 || result.code === 4) return false;
@@ -354,7 +367,7 @@ export class RcloneStorageProvider implements IStorageProvider {
         await this.ensureRemoteDirectory(storedPath);
         const result = await this.runRclone(
             ['copyto', tempPath, this.remotePath(storedPath),
-                '--transfers', '1', '--checkers', '2', '--retries', '2',
+                '--transfers', '1', '--checkers', '2',
                 '--contimeout', '20s', '--timeout', '5m',
                 '--stats', '1s', '--use-json-log'],
             { signal: options?.signal, onProgress: options?.onProgress, progressTotalBytes: stats.size },
@@ -391,7 +404,11 @@ export class RcloneStorageProvider implements IStorageProvider {
         const args = ['--config', configPath, 'rcat', this.remotePath(tempStoredPath),
             '--size', String(totalBytes),
             '--contimeout', '20s', '--timeout', '5m',
-            '--retries', '1', '--low-level-retries', '5', '--stats', '0'];
+            // Whole-operation retry would restart the stream from scratch on a
+            // consumed stdin, so keep --retries 1 here: per-chunk 429s are
+            // absorbed by --low-level-retries within the same process instead.
+            '--tpslimit', '2', '--tpslimit-burst', '1',
+            '--retries', '1', '--low-level-retries', '10', '--stats', '0'];
         if (this.config.mode === 'drime') {
             const chunkMiB = rcloneDrimeChunkSizeMiB(totalBytes);
             args.push('--drime-chunk-size', `${chunkMiB}Mi`, '--drime-upload-concurrency', '2');
@@ -404,7 +421,8 @@ export class RcloneStorageProvider implements IStorageProvider {
     async getFileStream(storedPath: string, options?: StorageReadOptions): Promise<NodeJS.ReadableStream> {
         options?.signal?.throwIfAborted();
         const configPath = await this.ensureConfigFile();
-        const args = ['--config', configPath, 'cat', this.remotePath(storedPath), '--contimeout', '20s', '--timeout', '5m'];
+        const args = ['--config', configPath, 'cat', this.remotePath(storedPath), '--contimeout', '20s', '--timeout', '5m',
+            '--tpslimit', '2', '--tpslimit-burst', '1'];
         const range = parseRangeHeader(options?.range);
         if (range) {
             args.push('--offset', String(range.offset));
@@ -444,8 +462,8 @@ export class RcloneStorageProvider implements IStorageProvider {
 
     async deleteFile(storedPath: string): Promise<void> {
         const result = await this.runRclone(
-            ['deletefile', this.remotePath(storedPath), '--retries', '1', '--low-level-retries', '1'],
-            { timeoutMs: 60_000 },
+            ['deletefile', this.remotePath(storedPath), '--low-level-retries', '1'],
+            { timeoutMs: 90_000 },
         );
         if (result.code === 0 || result.code === 3 || result.code === 4) return;
         throw new RcloneError(this.describeFailure('删除文件', result.code, result.stderr), result.code);
@@ -454,8 +472,8 @@ export class RcloneStorageProvider implements IStorageProvider {
     async getFileSize(storedPath: string): Promise<number> {
         const remote = this.remotePath(storedPath);
         const result = await this.runRclone(
-            ['size', remote, '--json', '--retries', '1', '--low-level-retries', '1'],
-            { timeoutMs: 60_000 },
+            ['size', remote, '--json', '--low-level-retries', '1'],
+            { timeoutMs: 90_000 },
         );
         if (result.code === 0) {
             try {
@@ -471,8 +489,8 @@ export class RcloneStorageProvider implements IStorageProvider {
         const base = this.config.basePath === '/' ? '' : this.config.basePath.slice(1);
         const parentRemote = parent ? `${this.config.remoteName}:${base ? `${base}/${parent}` : parent}` : `${this.config.remoteName}:${base}`;
         const listed = await this.runRclone(
-            ['lsjson', parentRemote, '--files-only', '--max-depth', '1', '--retries', '1', '--low-level-retries', '1'],
-            { timeoutMs: 60_000 },
+            ['lsjson', parentRemote, '--files-only', '--max-depth', '1', '--low-level-retries', '1'],
+            { timeoutMs: 90_000 },
         );
         if (listed.code !== 0) {
             throw new RcloneError(this.describeFailure('获取文件大小', result.code, result.stderr || listed.stderr), result.code);
@@ -494,7 +512,7 @@ export class RcloneStorageProvider implements IStorageProvider {
     /** Server-side rename of one remote object to another. Throws on failure. */
     async moveFile(fromStoredPath: string, toStoredPath: string): Promise<void> {
         const result = await this.runRclone(
-            ['moveto', this.remotePath(fromStoredPath), this.remotePath(toStoredPath), '--retries', '3'],
+            ['moveto', this.remotePath(fromStoredPath), this.remotePath(toStoredPath)],
             { timeoutMs: 120_000 },
         );
         if (result.code !== 0) {
