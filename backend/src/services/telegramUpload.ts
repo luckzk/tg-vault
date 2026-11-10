@@ -24,7 +24,7 @@ import {
     buildUploadSuccess,
     buildUploadFail,
     buildDownloadProgress,
-    buildSavingFile,
+    buildUploadProgress,
     buildQueuedMessage,
     buildRetryMessage,
     buildDuplicateSkipped,
@@ -61,7 +61,7 @@ import { getTelegramUserLocaleOrDefault } from './telegramLocalePreferences.js';
 import { DEFAULT_LOCALE, formatBytes as formatLocalizedBytes, t, type TelegramLocale } from '../i18n/telegram.js';
 import { buildTaskCenterDetail, ordinaryTaskCenterItem, type TaskCenterItem } from './telegramTaskCenter.js';
 import { buildProgressControlButtons, registerProgressCard, isInteractiveProgressCard, taskCenterCardOwners, taskCenterCardKey } from './telegramProgressControls.js';
-import { downloadProgressView } from './downloadProgress.js';
+import { downloadProgressView, DownloadSpeedSampler } from './downloadProgress.js';
 import { telegramDownloadStream, runTelegramDownloadStripes } from './telegramDownloadStream.js';
 import { setTimeout as waitForDownload } from 'node:timers/promises';
 import { getProviderDisplayName } from '../utils/providerMetadata.js';
@@ -954,7 +954,7 @@ function getConsolidatedFiles(chatId: string): ConsolidatedUploadFile[] {
     if (!map) return [];
     return Array.from(map.values(), file => {
         const group = file.groupId ? downloadQueue.getGroup(file.groupId, {}, true) : undefined;
-        if (!group || ['success', 'failed', 'cancelled'].includes(file.phase)) return file;
+        if (!group || ['success', 'failed', 'cancelled', 'uploading'].includes(file.phase)) return file;
         const paused = ['paused', 'pausing'].includes(group.state);
         const progress = downloadProgressView(group, group.state === 'running', 0);
         return { ...file, paused, downloaded: progress.completedBytes, total: progress.totalBytes,
@@ -3299,7 +3299,38 @@ export async function handleFileUpload(client: TelegramClient, event: NewMessage
                 nameReservation = await reserveStoredName(provider, finalFileName, storageFolder, activeAccountId);
                 const { storedName } = nameReservation;
 
-                updateUploadPhase(chatIdStr, uploadId, { phase: 'saving' });
+                // 上传（写入远程存储）阶段：用 rclone --stats 的已传字节采样上传速度，
+                // 与下载阶段同款 3 秒节流刷新消息。
+                const uploadSampler = new DownloadSpeedSampler(Date.now());
+                let lastUploadUpdateTime = 0;
+                const onUploadProgress = async (transferred: number, totalBytes: number) => {
+                    const now = Date.now();
+                    if (now - lastUploadUpdateTime < 3000) return;
+                    lastUploadUpdateTime = now;
+                    uploadSampler.update(transferred, now);
+                    const speed = uploadSampler.speed(now);
+                    updateUploadPhase(chatIdStr, uploadId, { phase: 'uploading', downloaded: transferred, total: totalBytes, speedBytesPerSecond: speed });
+                    if (silentSessionMap.has(chatIdStr)) {
+                        await runStatusAction(chatId, async () => {
+                            await refreshSilentProgress(client, chatId);
+                        });
+                        return;
+                    }
+                    if (useConsolidated()) {
+                        await runStatusAction(chatId, async () => {
+                            await refreshConsolidatedMessage(client, chatId);
+                        });
+                    } else if (statusMsg && !silentSessionMap.has(chatIdStr)) {
+                        await runStatusAction(chatId, async () => {
+                            await safeEditMessage(client, chatId, {
+                                message: statusMsg!.id,
+                                text: buildUploadProgress(finalFileName, transferred, totalBytes, typeEmoji, locale, speed) + destinationText,
+                            });
+                        });
+                    }
+                };
+
+                updateUploadPhase(chatIdStr, uploadId, { phase: 'uploading', downloaded: 0, total: actualSize, speedBytesPerSecond: 0 });
                 if (silentSessionMap.has(chatIdStr)) {
                     await runStatusAction(chatId, async () => {
                         await refreshSilentProgress(client, chatId);
@@ -3312,7 +3343,7 @@ export async function handleFileUpload(client: TelegramClient, event: NewMessage
                     await runStatusAction(chatId, async () => {
                         await safeEditMessage(client, chatId, {
                             message: statusMsg!.id,
-                            text: buildSavingFile(finalFileName, typeEmoji, locale) + destinationText,
+                            text: buildUploadProgress(finalFileName, 0, actualSize, typeEmoji, locale, 0) + destinationText,
                         });
                     });
                 }
@@ -3339,7 +3370,7 @@ export async function handleFileUpload(client: TelegramClient, event: NewMessage
                                 (name,stored_name,type,mime_type,size,path,thumbnail_path,width,height,source,folder,storage_account_id)
                                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`,
                                 [finalFileName,storedName,fileType,mimeType,actualSize,savedPath,thumbnailPath,dimensions.width,dimensions.height,sourceRef,storageFolder,activeAccountId]);
-                    }, { signal, beforeSave: storedPath => updateOrdinaryFile(singleGroupId, message.id, { status: 'saving', storedPath, storedName }) }),
+                    }, { signal, onProgress: onUploadProgress, beforeSave: storedPath => updateOrdinaryFile(singleGroupId, message.id, { status: 'saving', storedPath, storedName }) }),
                 );
                 while (true) {
                     try {
@@ -3354,7 +3385,9 @@ export async function handleFileUpload(client: TelegramClient, event: NewMessage
                         await waitForStorageCooldownRetry(error.cooldownUntil, signal || new AbortController().signal, async () => undefined);
                         signal?.throwIfAborted();
                         if (taskId) await downloadQueue.beginUpload(taskId);
-                        updateUploadPhase(chatIdStr, uploadId, { phase: 'saving' });
+                        uploadSampler.reset(Date.now());
+                        lastUploadUpdateTime = 0;
+                        updateUploadPhase(chatIdStr, uploadId, { phase: 'uploading', downloaded: 0, total: actualSize, speedBytesPerSecond: 0 });
                     }
                 }
                 if (fs.existsSync(localFilePath)) fs.unlinkSync(localFilePath);

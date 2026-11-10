@@ -366,6 +366,26 @@ export function buildDownloadProgress(
     ].join('\n');
 }
 
+/** 上传进度（写入远程存储） */
+export function buildUploadProgress(
+    fileName: string,
+    uploaded: number,
+    total: number,
+    typeEmoji: string,
+    locale: TelegramLocale = DEFAULT_LOCALE,
+    speedBytesPerSecond: number = 0,
+): string {
+    const bar = generateProgressBar(uploaded, total);
+    const speed = Number.isFinite(speedBytesPerSecond) ? Math.max(0, speedBytesPerSecond) : 0;
+    return [
+        t(locale, 'upload.uploading'),
+        `${bar} ⚡ ${formatLocalizedBytes(speed, locale)}/s`,
+        ``,
+        `${typeEmoji} ${fileName}`,
+        `${formatLocalizedBytes(uploaded, locale)} / ${total > 0 ? formatLocalizedBytes(total, locale) : "—"}`,
+    ].join('\n');
+}
+
 /** 文件保存中 */
 export function buildSavingFile(fileName: string, typeEmoji: string, locale: TelegramLocale = DEFAULT_LOCALE): string {
     const bar = generateProgressBar(1, 1);
@@ -480,7 +500,7 @@ export function buildSilentProgress(
         ? undefined
         : activeBatch?.currentFileActive
             ? activeBatch.currentFileName
-            : activeSingle?.phase === 'downloading' || activeSingle?.phase === 'saving'
+            : activeSingle?.phase === 'downloading' || activeSingle?.phase === 'uploading' || activeSingle?.phase === 'saving'
                 ? activeSingle.fileName
                 : undefined;
     const progress = generateProgressBar(completedFiles, Math.max(totalFiles, 1));
@@ -495,7 +515,7 @@ export function buildSilentProgress(
                 ? `⏸️ **下载已暂停，保留当前进度**`
                 : `🤐 **后台批量处理中**`,
         `${progress} (${completedFiles}/${totalFiles})`,
-        `⚡ ${formatBytes(queuePaused ? 0 : batches.reduce((sum, batch) => sum + (batch.downloadProgress?.speedBytesPerSecond || 0), 0) + singleFiles.reduce((sum, file) => sum + (file.phase === 'downloading' ? file.speedBytesPerSecond || 0 : 0), 0))}/s`,
+        `⚡ ${formatBytes(queuePaused ? 0 : batches.reduce((sum, batch) => sum + (batch.downloadProgress?.speedBytesPerSecond || 0), 0) + singleFiles.reduce((sum, file) => sum + ((file.phase === 'downloading' || file.phase === 'uploading') ? file.speedBytesPerSecond || 0 : 0), 0))}/s`,
         ``,
         `✅ 成功: ${successfulFiles}　❌ 失败: ${failedFiles}　⏳ 剩余: ${remainingFiles}`,
         ...Array.from(new Set([...batches.map(batch => batch.storageLabel || batch.providerName), ...singleFiles.map(file => file.storageLabel || file.providerName)].filter(Boolean))).map(label => `📍 存储：${label}`),
@@ -558,7 +578,7 @@ export interface ConsolidatedUploadFile {
     id?: string;
     fileName: string;
     typeEmoji: string;
-    phase: 'queued' | 'downloading' | 'saving' | 'success' | 'failed' | 'retrying' | 'cancelled';
+    phase: 'queued' | 'downloading' | 'uploading' | 'saving' | 'success' | 'failed' | 'retrying' | 'cancelled';
     speedBytesPerSecond?: number;
     paused?: boolean;
     downloaded?: number;
@@ -691,7 +711,7 @@ export async function buildConsolidatedStatus(
         lines.push('');
     }
 
-    const activeSingles = singleFiles.filter(f => f.phase === 'downloading' || f.phase === 'saving' || f.phase === 'retrying');
+    const activeSingles = singleFiles.filter(f => f.phase === 'downloading' || f.phase === 'uploading' || f.phase === 'saving' || f.phase === 'retrying');
     const queuedSingles = singleFiles.filter(f => f.phase === 'queued');
     const doneSingles = singleFiles.filter(f => f.phase === 'success' || f.phase === 'failed');
 
@@ -707,6 +727,10 @@ export async function buildConsolidatedStatus(
             switch (file.phase) {
                 case 'downloading':
                     icon = '⬇️';
+                    detail = `${generateProgressBar(file.downloaded || 0, file.total || 0)} ${formatBytes(file.downloaded || 0)} / ${file.total ? formatBytes(file.total) : '—'} ⚡ ${formatBytes(Number.isFinite(file.speedBytesPerSecond) ? Math.max(0, file.speedBytesPerSecond || 0) : 0)}/s`;
+                    break;
+                case 'uploading':
+                    icon = '⬆️';
                     detail = `${generateProgressBar(file.downloaded || 0, file.total || 0)} ${formatBytes(file.downloaded || 0)} / ${file.total ? formatBytes(file.total) : '—'} ⚡ ${formatBytes(Number.isFinite(file.speedBytesPerSecond) ? Math.max(0, file.speedBytesPerSecond || 0) : 0)}/s`;
                     break;
                 case 'saving':
