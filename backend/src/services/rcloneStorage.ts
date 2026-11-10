@@ -178,6 +178,43 @@ export class RcloneStorageProvider implements IStorageProvider {
     private configPath: string | null = null;
     private configMaterialized = false;
     private readonly confirmedDirectories = new Map<string, number>();
+    /** 流式上传互斥：同一账户同一时间只跑一个 rcat，避免相册多文件并发时每个进程各 2 次/秒叠加冲垮 Drime 的突发限流。 */
+    private uploadSlot: Promise<void> = Promise.resolve();
+
+    /**
+     * 排队等一个流式上传空位；返回的 release 必须在流结束（finish/abort）时调用，
+     * 哪怕失败也要放行，否则后续上传会永远卡住。
+     */
+    private acquireUploadSlot(): Promise<() => void> {
+        let release!: () => void;
+        const next = new Promise<void>((resolve) => { release = resolve; });
+        const previous = this.uploadSlot;
+        this.uploadSlot = previous.then(() => next);
+        return previous.then(() => release);
+    }
+
+    /**
+     * 每次 rclone 调用记一行 JSON 日志（`rclone.call`），方便在后端日志里数 Drime
+     * 请求：`docker compose logs backend | grep rclone.call`。参数里永不出现 token
+     * 与配置文件路径（--config 的值会被剔除，残留敏感值再经 redact 过滤）。
+     */
+    logRcloneCall(op: string, rawArgs: string[], startedAt: number, code: number | null, errorTail = ''): void {
+        const args: string[] = [];
+        for (let i = 0; i < rawArgs.length; i++) {
+            if (rawArgs[i] === '--config') { i++; continue; }
+            args.push(rawArgs[i]);
+        }
+        const entry: Record<string, unknown> = {
+            event: 'rclone.call',
+            account: this.id,
+            op,
+            args: this.redact(args.join(' ')),
+            durationMs: Date.now() - startedAt,
+            code,
+        };
+        if (code !== 0 && errorTail) entry.error = this.redact(errorTail).replace(/\s+/g, ' ').trim().slice(-500);
+        console.log(JSON.stringify(entry));
+    }
 
     constructor(
         public id: string,
@@ -256,6 +293,7 @@ export class RcloneStorageProvider implements IStorageProvider {
     ): Promise<RcloneRunResult> {
         const configPath = await this.ensureConfigFile();
         options.signal?.throwIfAborted();
+        const startedAt = Date.now();
         const child: ChildProcess = spawn(
             'rclone', ['--config', configPath, ...RCLONE_PACING_ARGS, ...args],
             { stdio: ['ignore', 'pipe', 'pipe'] },
@@ -288,8 +326,10 @@ export class RcloneStorageProvider implements IStorageProvider {
                 child.once('error', reject);
                 child.once('close', resolve);
             }).catch((error: unknown) => {
+                this.logRcloneCall(args[0] ?? '', args, startedAt, null, error instanceof Error ? error.message : String(error));
                 throw new RcloneError(`rclone 启动失败：${error instanceof Error ? error.message : String(error)}`);
             });
+            this.logRcloneCall(args[0] ?? '', args, startedAt, code, stderrTail.toString('utf8'));
             return {
                 code,
                 stdout: stdoutTail.toString('utf8'),
@@ -412,22 +452,29 @@ export class RcloneStorageProvider implements IStorageProvider {
         assertSafeSegment(tempName, '临时文件名');
         const tempStoredPath = joinStoredPath(folder, tempName);
         await this.ensureRemoteDirectory(tempStoredPath);
-        const configPath = await this.ensureConfigFile();
-        const args = ['--config', configPath, 'rcat', this.remotePath(tempStoredPath),
-            '--size', String(totalBytes),
-            '--contimeout', '20s', '--timeout', '5m',
-            // Whole-operation retry would restart the stream from scratch on a
-            // consumed stdin, so keep --retries 1 here: per-chunk 429s are
-            // absorbed by --low-level-retries within the same process instead.
-            '--tpslimit', '2', '--tpslimit-burst', '1',
-            '--retries', '1', '--low-level-retries', '10', '--stats', '0'];
-        if (this.config.mode === 'drime') {
-            const chunkMiB = rcloneDrimeChunkSizeMiB(totalBytes);
-            args.push('--drime-chunk-size', `${chunkMiB}Mi`, '--drime-upload-concurrency', '2');
+        // 流式上传串行化：相册并发上传时每个文件一个 rcat 进程，各自 2 次/秒
+        // 叠加起来照样 429。先排队拿空位，流结束（finish/abort）时才放行。
+        const releaseUploadSlot = await this.acquireUploadSlot();
+        try {
+            const configPath = await this.ensureConfigFile();
+            const args = ['--config', configPath, 'rcat', this.remotePath(tempStoredPath),
+                '--size', String(totalBytes),
+                '--contimeout', '20s', '--timeout', '5m',
+                // Whole-operation retry would restart the stream from scratch on a
+                // consumed stdin, so keep --retries 1 here: per-chunk 429s are
+                // absorbed by --low-level-retries within the same process instead.
+                '--tpslimit', '2', '--tpslimit-burst', '1',
+                '--retries', '1', '--low-level-retries', '10', '--stats', '0'];
+            if (this.config.mode === 'drime') {
+                const chunkMiB = rcloneDrimeChunkSizeMiB(totalBytes);
+                args.push('--drime-chunk-size', `${chunkMiB}Mi`, '--drime-upload-concurrency', '2');
+            }
+            const child: ChildProcessWithoutNullStreams = spawn('rclone', args, { stdio: ['pipe', 'pipe', 'pipe'] });
+            return new RcloneUploadStream(this, child, storedPath, tempStoredPath, totalBytes, options.signal, args, releaseUploadSlot);
+        } catch (error) {
+            releaseUploadSlot();
+            throw error;
         }
-        const child: ChildProcessWithoutNullStreams = spawn('rclone', args, { stdio: ['pipe', 'pipe', 'pipe'] });
-        const stream = new RcloneUploadStream(this, child, storedPath, tempStoredPath, totalBytes, options.signal);
-        return stream;
     }
 
     async getFileStream(storedPath: string, options?: StorageReadOptions): Promise<NodeJS.ReadableStream> {
@@ -435,6 +482,7 @@ export class RcloneStorageProvider implements IStorageProvider {
         const configPath = await this.ensureConfigFile();
         const args = ['--config', configPath, 'cat', this.remotePath(storedPath), '--contimeout', '20s', '--timeout', '5m',
             '--tpslimit', '2', '--tpslimit-burst', '1'];
+        const startedAt = Date.now();
         const range = parseRangeHeader(options?.range);
         if (range) {
             args.push('--offset', String(range.offset));
@@ -455,6 +503,7 @@ export class RcloneStorageProvider implements IStorageProvider {
         };
         child.once('error', (error) => fail(new RcloneError(this.describeFailure('下载', -1, String(error?.message || error)))));
         child.once('close', (code) => {
+            this.logRcloneCall('cat', args, startedAt, code, stderrTail.toString('utf8'));
             if (code !== 0 && code !== null) {
                 fail(new RcloneError(this.describeFailure('下载', code, stderrTail.toString('utf8')), code));
             }
@@ -575,6 +624,9 @@ class RcloneUploadStream implements StorageUploadStream {
     private stderrTail: Buffer = Buffer.alloc(0);
     private stdoutTail: Buffer = Buffer.alloc(0);
     private exitPromise: Promise<number>;
+    private readonly startedAt = Date.now();
+    private callLogged = false;
+    private slotReleased = false;
 
     constructor(
         private readonly provider: RcloneStorageProvider,
@@ -583,6 +635,8 @@ class RcloneUploadStream implements StorageUploadStream {
         tempPath: string,
         private readonly totalBytes: number,
         private readonly signal?: AbortSignal,
+        private readonly logArgs: string[] = [],
+        private readonly releaseUploadSlot: () => void = () => undefined,
     ) {
         this.storedPath = storedPath;
         this.tempPath = tempPath;
@@ -598,6 +652,21 @@ class RcloneUploadStream implements StorageUploadStream {
     private appendTail(buffer: Buffer, chunk: Buffer): Buffer {
         const next = Buffer.concat([buffer, chunk]);
         return next.length > STDERR_TAIL_BYTES ? next.subarray(next.length - STDERR_TAIL_BYTES) : next;
+    }
+
+    /** rcat 进程只记一行日志（finish/abort 各走一次，靠 callLogged 去重）。 */
+    private logCall(code: number | null): void {
+        if (this.callLogged) return;
+        this.callLogged = true;
+        this.provider.logRcloneCall('rcat', this.logArgs, this.startedAt, code,
+            this.stderrTail.toString('utf8') || this.stdoutTail.toString('utf8'));
+    }
+
+    /** 流结束就放行下一个上传；哪怕失败也要放，否则后续上传永远卡住。 */
+    private releaseSlot(): void {
+        if (this.slotReleased) return;
+        this.slotReleased = true;
+        this.releaseUploadSlot();
     }
 
     private childFailedError(label: string): RcloneError {
@@ -651,44 +720,57 @@ class RcloneUploadStream implements StorageUploadStream {
         this.signal?.throwIfAborted();
         this.finished = true;
         try {
-            this.child.stdin.end();
-        } catch { /* stdin already closed */ }
-        const code = await this.exitPromise;
-        if (code !== 0) throw this.childFailedError('失败');
-        if (this.bytesWritten !== this.totalBytes) {
-            throw new Error(`流式传输大小不一致：已写 ${this.bytesWritten} 字节，预期 ${this.totalBytes} 字节`);
+            try {
+                this.child.stdin.end();
+            } catch { /* stdin already closed */ }
+            const code = await this.exitPromise.catch((error: unknown) => {
+                this.logCall(null);
+                throw error;
+            });
+            this.logCall(code);
+            if (code !== 0) throw this.childFailedError('失败');
+            if (this.bytesWritten !== this.totalBytes) {
+                throw new Error(`流式传输大小不一致：已写 ${this.bytesWritten} 字节，预期 ${this.totalBytes} 字节`);
+            }
+            const tempSize = await this.provider.getFileSize(this.tempPath);
+            if (tempSize !== this.totalBytes) {
+                throw new Error(`流式上传后临时文件大小校验失败：远端 ${tempSize} 字节，预期 ${this.totalBytes} 字节`);
+            }
+            if (await this.provider.fileExists(this.storedPath.split('/').pop()!, this.storedPath.split('/').slice(0, -1).join('/') || null)) {
+                throw new Error('正式文件已存在，拒绝覆盖；临时文件已保留，请人工核对');
+            }
+            await this.provider.moveFile(this.tempPath, this.storedPath);
+            const finalSize = await this.provider.getFileSize(this.storedPath);
+            if (finalSize !== this.totalBytes) {
+                throw new Error(`流式改名后正式文件大小校验失败：远端 ${finalSize} 字节，预期 ${this.totalBytes} 字节`);
+            }
+            return this.storedPath;
+        } finally {
+            this.releaseSlot();
         }
-        const tempSize = await this.provider.getFileSize(this.tempPath);
-        if (tempSize !== this.totalBytes) {
-            throw new Error(`流式上传后临时文件大小校验失败：远端 ${tempSize} 字节，预期 ${this.totalBytes} 字节`);
-        }
-        if (await this.provider.fileExists(this.storedPath.split('/').pop()!, this.storedPath.split('/').slice(0, -1).join('/') || null)) {
-            throw new Error('正式文件已存在，拒绝覆盖；临时文件已保留，请人工核对');
-        }
-        await this.provider.moveFile(this.tempPath, this.storedPath);
-        const finalSize = await this.provider.getFileSize(this.storedPath);
-        if (finalSize !== this.totalBytes) {
-            throw new Error(`流式改名后正式文件大小校验失败：远端 ${finalSize} 字节，预期 ${this.totalBytes} 字节`);
-        }
-        return this.storedPath;
     }
 
     async abort(): Promise<void> {
         if (this.finished || this.aborted) return;
         this.aborted = true;
-        try { this.child.stdin.destroy(); } catch { /* already closed */ }
-        if (this.child.exitCode === null) {
-            this.child.kill('SIGTERM');
-            const exited = await Promise.race([
-                this.exitPromise.then(() => true),
-                new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 10_000)),
-            ]);
-            if (!exited && this.child.exitCode === null) {
-                this.child.kill('SIGKILL');
-                await this.exitPromise.catch(() => undefined);
+        try {
+            try { this.child.stdin.destroy(); } catch { /* already closed */ }
+            if (this.child.exitCode === null) {
+                this.child.kill('SIGTERM');
+                const exited = await Promise.race([
+                    this.exitPromise.then(() => true),
+                    new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 10_000)),
+                ]);
+                if (!exited && this.child.exitCode === null) {
+                    this.child.kill('SIGKILL');
+                    await this.exitPromise.catch(() => undefined);
+                }
             }
+            await this.exitPromise.catch(() => undefined);
+            this.logCall(this.child.exitCode);
+            await this.provider.removeQuietly(this.tempPath);
+        } finally {
+            this.releaseSlot();
         }
-        await this.exitPromise.catch(() => undefined);
-        await this.provider.removeQuietly(this.tempPath);
     }
 }
