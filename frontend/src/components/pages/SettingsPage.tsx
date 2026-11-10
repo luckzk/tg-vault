@@ -797,18 +797,20 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
                             <p className="text-[13px] font-medium">{t('updates.buildFromSource')}</p>
                             <p className="mt-1 text-[12px] leading-5 text-muted-foreground">{t(buildFromSource ? 'updates.buildFromSourceOnHint' : 'updates.buildFromSourceOffHint')}</p>
                         </div>
-                        <button
-                            type="button"
-                            role="switch"
-                            aria-checked={buildFromSource}
-                            aria-label={t('updates.buildFromSource')}
-                            onClick={() => setBuildFromSourceOverride(!buildFromSource)}
-                            disabled={isApplyingUpdate || updateJobState === 'queued' || updateJobState === 'running'}
-                            className="settings-switch-target shrink-0 disabled:cursor-not-allowed disabled:opacity-50"
-                        >
-                            <span aria-hidden="true" className={cn('settings-switch-track', buildFromSource && 'is-enabled')}><span /></span>
-                            <span className="sr-only">{t(buildFromSource ? 'updates.buildFromSourceOn' : 'updates.buildFromSourceOff')}</span>
-                        </button>
+                        <div className="flex shrink-0 items-center gap-2">
+                            <span className="text-[12px] font-medium text-muted-foreground">{t(buildFromSource ? 'updates.buildFromSourceOn' : 'updates.buildFromSourceOff')}</span>
+                            <button
+                                type="button"
+                                role="switch"
+                                aria-checked={buildFromSource}
+                                aria-label={t('updates.buildFromSource')}
+                                onClick={() => setBuildFromSourceOverride(!buildFromSource)}
+                                disabled={isApplyingUpdate || updateJobState === 'queued' || updateJobState === 'running'}
+                                className="settings-switch-target shrink-0 disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                                <span aria-hidden="true" className={cn('settings-switch-track', buildFromSource && 'is-enabled')}><span /></span>
+                            </button>
+                        </div>
                     </div>
                     {updateStatus?.agent && !updateStatus.agent.online && (
                         <p className="settings-help">{t('updates.agentOffline')} {t('updates.manualCommand')}</p>

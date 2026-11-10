@@ -48,6 +48,7 @@
 .settings-maintenance-cleanup-actions > button { padding-inline: 14px; }
 @media (prefers-reduced-motion: reduce) {
   .settings-maintenance-switch .settings-switch-track > span { transition: none; }
+  .settings-switch-track > span { transition: none; }
 }
 .settings-guide { min-width: 0; padding: var(--tv-space-panel); background: hsl(var(--secondary) / .75); box-shadow: none; }
 .settings-guide > .settings-icon { margin-bottom: 12px; }
@@ -191,7 +192,10 @@
 .settings-local__facts > div { padding: 0; border: 0; border-radius: 0; }
 .settings-switch-target { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; width: 56px; min-height: 44px; padding: 0; border: 0; background: transparent; border-radius: var(--tv-radius-control); }
 .settings-switch-target:focus-visible, .settings-icon-button:focus-visible { outline: 2px solid hsl(var(--ring)); outline-offset: 3px; }
-.settings-switch-track { position: relative; display: block; width: 48px; height: 28px; border-width: 1px; border-style: solid; border-radius: 999px; transition: background-color .15s, border-color .15s; }
+.settings-switch-track { position: relative; display: block; width: 48px; height: 28px; border-width: 1px; border-style: solid; border-radius: 999px; border-color: hsl(var(--input)); background: hsl(var(--muted)); transition: background-color .15s, border-color .15s; }
+.settings-switch-track.is-enabled { border-color: hsl(var(--primary)); background: hsl(var(--primary)); }
+.settings-switch-track > span { position: absolute; left: 2px; top: 2px; width: 22px; height: 22px; border-radius: 50%; background: hsl(var(--card)); box-shadow: 0 1px 3px hsl(var(--foreground) / .15); transition: transform .15s; }
+.settings-switch-track.is-enabled > span { transform: translateX(20px); }
 .settings-icon-button { display: inline-flex; align-items: center; justify-content: center; min-width: 44px; min-height: 44px; flex-shrink: 0; }
 .settings-surface a[target='_blank'] { min-height: 44px; align-items: center; }
 .settings-local__details summary { min-height: 44px; padding-block: 10px; }
