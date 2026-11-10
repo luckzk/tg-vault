@@ -726,7 +726,7 @@ export class DownloadTaskQueue {
         return { active, pending, total: active + pending };
     }
 
-    async retryFailed(limit = 10, scope: DownloadTaskScope = {}, groupId?: string): Promise<{ retried: number }> {
+    async retryFailed(limit = 10, scope: DownloadTaskScope = {}, groupId?: string): Promise<{ retried: number; groupIds: string[]; tasks: { groupId: string; fileName: string }[]; settled: Promise<PromiseSettledResult<void>[]> }> {
         const failed = this.history
             .filter(task => task.status === 'failed')
             .filter(task => !groupId || task.groupId === groupId)
@@ -736,6 +736,9 @@ export class DownloadTaskQueue {
             })
             .slice(0, Math.max(1, limit));
         let retried = 0;
+        const groupIds = new Set<string>();
+        const tasks: { groupId: string; fileName: string }[] = [];
+        const attempts: Promise<void>[] = [];
         for (const task of failed) {
             const group = this.groups.get(task.groupId);
             if (!group || group.stateOverride === 'cancelled' || group.stateOverride === 'cancelling') continue;
@@ -744,11 +747,14 @@ export class DownloadTaskQueue {
             group.settledTotalBytes = Math.max(0, (group.settledTotalBytes || 0) - validBytes(task.totalSize));
             group.settledKnown = Math.max(0, (group.settledKnown || 0) - (validBytes(task.totalSize) > 0 ? 1 : 0));
             this.removeHistoryTask(task);
-            void this.add(task.groupId, task.fileName, task.rawExecute, task.totalSize || 0, task.onPendingCancelled)
-                .catch(error => console.error(`[Queue] retry failed: ${task.fileName}`, error));
+            const attempt = this.add(task.groupId, task.fileName, task.rawExecute, task.totalSize || 0, task.onPendingCancelled);
+            attempt.catch(error => console.error(`[Queue] retry failed: ${task.fileName}`, error));
+            attempts.push(attempt);
+            groupIds.add(task.groupId);
+            tasks.push({ groupId: task.groupId, fileName: task.fileName });
             retried += 1;
         }
-        return { retried };
+        return { retried, groupIds: [...groupIds], tasks, settled: Promise.allSettled(attempts) };
     }
 
     cancelScope(scope: DownloadTaskScope, reason = '用户取消当前聊天任务'): { active: number; pending: number; total: number } {

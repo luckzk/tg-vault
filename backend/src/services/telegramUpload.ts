@@ -703,7 +703,9 @@ async function finalizeSilentSessionIfDone(client: TelegramClient, chatId: Api.T
     // 清理静默状态
     silentSessionMap.delete(chatIdStr);
     removeTaskControlScope(s?.taskId);
-    silentNoticeMessageIdMap.delete(chatIdStr);
+    // 有失败项时保留完成消息 ID：用户随后 /tg_retry 成功后要回头改这条定稿消息；
+    // 无失败时删除，避免旧消息被后续会话误用。
+    if (!s?.failed) silentNoticeMessageIdMap.delete(chatIdStr);
     lastSilentNotificationTimeMap.delete(chatIdStr);
 
     console.log(`[TG][silent] finalized chat=${chatIdStr} failed=${s?.failed || 0}`);
@@ -1408,8 +1410,23 @@ export function listFailedDownloadTaskDetails(taskId: string, chatId: string, us
     return [...files, ...batches];
 }
 
-export async function retryFailedDownloadTasks(limit = 10, taskId?: string, chatId?: string, userId?: number) {
+export async function retryFailedDownloadTasks(limit = 10, taskId?: string, chatId?: string, userId?: number, client?: TelegramClient) {
     const receipt = taskId && userId !== undefined ? await getTaskReceipt(taskId, userId) : null;
+    // 重试任务结算后刷新状态消息：重试直接重跑队列任务，发生在批次处理器之外，
+    // 处理器早已结束，无人更新批次计数与消息；靠结算钩子补上。
+    const hookRetryResult = (result: { retried: number; groupIds: string[]; tasks: { groupId: string; fileName: string }[]; settled: Promise<PromiseSettledResult<void>[]> }) => {
+        if (result.retried > 0 && client) {
+            void (async () => {
+                try {
+                    await result.settled;
+                    await refreshRetriedGroups(result.groupIds, result.tasks, taskId, client);
+                } catch (error) {
+                    console.error('[TG][retry] refresh failed:', error);
+                }
+            })();
+        }
+        return result.retried;
+    };
     if (receipt) {
         if (chatId !== receipt.chatId) return { retried: 0 };
         let retried = 0;
@@ -1419,11 +1436,88 @@ export async function retryFailedDownloadTasks(limit = 10, taskId?: string, chat
         }
         for (const groupId of receipt.groupIds) {
             if (retried >= limit) break;
-            retried += (await downloadQueue.retryFailed(limit - retried, { chatId, userId }, groupId)).retried;
+            retried += hookRetryResult(await downloadQueue.retryFailed(limit - retried, { chatId, userId }, groupId));
         }
         return { retried };
     }
-    return downloadQueue.retryFailed(limit, { chatId, userId }, taskId);
+    const result = await downloadQueue.retryFailed(limit, { chatId, userId }, taskId);
+    return { retried: hookRetryResult(result) };
+}
+
+/**
+ * 重试任务结算后刷新状态：按队列组快照重算批次计数，并把静默会话的高水位失败数
+ * 按实际成功数扣减（会话失败数只增不减，不扣减消息永远显示旧失败数），最后刷新消息。
+ * 会话已定稿时直接改定稿消息（仅单组，避免多组总数失真）。
+ */
+async function refreshRetriedGroups(
+    groupIds: string[],
+    tasks: { groupId: string; fileName: string }[],
+    taskId: string | undefined,
+    client: TelegramClient,
+) {
+    const history = downloadQueue.getDetailedStatus().history;
+    const succeededByGroup = new Map<string, number>();
+    for (const task of tasks) {
+        // history 按结算顺序追加，取最后一条同组同名记录为准。
+        const settled = [...history].reverse().find(item => item.groupId === task.groupId && item.fileName === task.fileName);
+        if (settled?.status === 'success') {
+            succeededByGroup.set(task.groupId, (succeededByGroup.get(task.groupId) || 0) + 1);
+        }
+    }
+    const chatIds = new Set<string>();
+    for (const groupId of groupIds) {
+        const snap = downloadQueue.getGroupSnapshot(groupId, {}, true);
+        if (!snap || !snap.chatId) continue;
+        const chatIdStr = snap.chatId;
+        chatIds.add(chatIdStr);
+        const succeeded = succeededByGroup.get(groupId) || 0;
+        const completed = snap.completed + snap.failed + snap.cancelled;
+        const failed = snap.failed + snap.cancelled;
+        const batches = chatActiveBatches.get(chatIdStr);
+        let batchId: string | undefined;
+        batches?.forEach((entry, id) => { if (entry.groupId === groupId) batchId = id; });
+        if (batchId) {
+            updateBatch(chatIdStr, batchId, { completed, successful: snap.completed, failed, queuePending: 0 });
+        }
+        // 先更新批次条目再扣减会话失败数（刷新时取 max，顺序反了会把旧值顶回来）。
+        const session = silentSessionMap.get(chatIdStr);
+        if (session && succeeded > 0) {
+            session.failed = Math.max(0, session.failed - succeeded);
+        }
+    }
+    for (const chatIdStr of chatIds) {
+        if (silentSessionMap.has(chatIdStr)) {
+            await refreshSilentProgress(client, chatIdStr);
+            await finalizeSilentSessionIfDone(client, chatIdStr);
+            continue;
+        }
+        // 会话已定稿：完成消息 ID 有失败时会被保留，单组重试直接改定稿消息。
+        const retainedMsgId = silentNoticeMessageIdMap.get(chatIdStr);
+        if (retainedMsgId && groupIds.length === 1) {
+            const snap = downloadQueue.getGroupSnapshot(groupIds[0], {}, true);
+            if (snap && snap.chatId === chatIdStr) {
+                const total = snap.total;
+                const failed = snap.failed + snap.cancelled;
+                const completed = snap.completed + snap.failed + snap.cancelled;
+                const text = buildSilentAllTasksComplete(total, failed, taskId, [], [{
+                    folderName: snap.title || 'telegram',
+                    folderPath: snap.targetFolder || undefined,
+                    totalFiles: total,
+                    completed,
+                    successful: snap.completed,
+                    failed,
+                    providerName: snap.targetProvider,
+                }]);
+                const buttons = failed > 0 && taskId
+                    ? (() => { const b = buildTaskControlButtons(taskId, false, undefined, false, false, failed); if (b) b.rows = b.rows.slice(1); return b; })()
+                    : undefined;
+                await safeEditMessage(client, chatIdStr, { message: retainedMsgId, text, buttons });
+                if (failed === 0) silentNoticeMessageIdMap.delete(chatIdStr);
+                continue;
+            }
+        }
+        await refreshConsolidatedMessage(client, chatIdStr);
+    }
 }
 
 // 多文件上传队列管理
@@ -2023,6 +2117,24 @@ async function processFileUpload(
             if (permissionBeforeStore === 'cancelled' || signal?.aborted) throw new Error('下载任务已停止');
             // Storage failures must not restart Telegram or create another unresolved write.
             retryDownload = false;
+            // 批量写盘阶段的上传速度：rclone --stats 采样，3 秒节流写入批次条目，
+            // 由 3 秒状态刷新器渲染（静默汇总与合并消息按当前阶段取速度）。
+            // 频道分段文件没有 queue，批次条目由频道任务侧维护，这里不写。
+            const uploadSampler = new DownloadSpeedSampler(Date.now());
+            let lastBatchUploadUpdateTime = 0;
+            const onBatchUploadProgress = (transferred: number) => {
+                const now = Date.now();
+                if (now - lastBatchUploadUpdateTime < 3000) return;
+                lastBatchUploadUpdateTime = now;
+                uploadSampler.update(transferred, now);
+                if (!queue?.chatId) return;
+                const batchId = (file.message as any).groupedId?.toString();
+                if (!batchId) return;
+                updateBatch(queue.chatId.toString(), batchId, {
+                    uploadSpeedBytesPerSecond: uploadSampler.speed(now),
+                    uploadSpeedUpdatedAt: now,
+                });
+            };
             const save = async (streamed?: { storedPath: string }): Promise<TelegramPersistedWrite> => {
                 const persistentRef = file.persistentRef;
                 signal?.throwIfAborted();
@@ -2049,8 +2161,8 @@ async function processFileUpload(
                     savedPath = streamed
                         ? streamed.storedPath
                         : preparedWrite
-                            ? await preparedWrite.save(signal)
-                            : await provider.saveFile(localFilePath!, storedName!, file.mimeType, storageFolder, { signal });
+                            ? await preparedWrite.save(signal, onBatchUploadProgress)
+                            : await provider.saveFile(localFilePath!, storedName!, file.mimeType, storageFolder, { signal, onProgress: onBatchUploadProgress });
                     finalPath = savedPath;
                     if (operationId) await markTelegramWriteObjectPresent(pool, operationId, savedPath);
                     const insertSql = `INSERT INTO files (name, stored_name, type, mime_type, size, path, thumbnail_path, width, height, source, folder, storage_account_id)
@@ -2335,15 +2447,14 @@ async function processBatchUploadSnapshot(client: TelegramClient | undefined, qu
     const firstBatchFile = queue.files[0];
     if (firstBatchFile) {
         const chatName = await getTelegramChatName(firstBatchFile.message);
-        const batchFolder = null;
         const storageRules = await getStoragePathRules();
-        const automaticPreview = buildStorageFolderWithRules({
+        // 一个转发消息一个文件夹：基础路径 telegram/<频道>，再追加 sanitized 批次名，
+        // 视频和图片放一起，不再按类型分。用户指定过 once/session 路径时仍以其为准。
+        const batchBase = buildStorageFolderWithRules({
             source: 'telegram',
             chatName,
-            folder: batchFolder,
-            mimeType: firstBatchFile.mimeType,
-            fileName: firstBatchFile.fileName,
         }, storageRules);
+        const automaticPreview = batchBase ? `${batchBase}/${sanitizedFolderName}` : sanitizedFolderName;
         const storageFolder = await resolveTelegramStorageFolderPersistent(chatId.toString(), automaticPreview);
         queue.storageFolder = storageFolder;
         await updateTransferTask('telegram_bot', groupId, { targetFolder: storageFolder });
@@ -2720,6 +2831,7 @@ export async function downloadTelegramChannelRange(
         if (!executionGroupKey) {
             registerBatch(chatIdStr, batchId, {
                 id: batchId,
+                groupId: channelGroupId,
                 folderName: sourceEntity.toString(),
                 folderPath: taskResolvedStorageFolder || undefined,
                 totalFiles: downloadableRefs.length,

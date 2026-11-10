@@ -1180,7 +1180,7 @@ async function handleUploadReceiptCallback(update: Api.UpdateBotCallbackQuery, d
         return;
     }
     if (action === 'retry') {
-        const result = await retryFailedDownloadTasks(50, taskId, chatId, userId);
+        const result = await retryFailedDownloadTasks(50, taskId, chatId, userId, client);
         await refreshSilentProgress(client, update.peer, userId);
         await client.invoke(new Api.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: result.retried > 0 ? t(locale, 'bot.callback.retryCount', { count: result.retried }) : t(locale, 'bot.callback.noRetry') }));
         return;

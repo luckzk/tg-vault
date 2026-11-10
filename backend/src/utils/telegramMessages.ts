@@ -457,6 +457,9 @@ interface SilentProgressBatch {
     currentFileName?: string;
     currentFileActive?: boolean;
     downloadProgress?: { percent: number; completedBytes: number; totalBytes: number; speedBytesPerSecond: number };
+    /** 写盘阶段的上传速度（批量保存经 rclone --stats 采样）；与下载速度互斥显示。 */
+    uploadSpeedBytesPerSecond?: number;
+    uploadSpeedUpdatedAt?: number;
 }
 
 interface SilentProgressFile {
@@ -468,6 +471,20 @@ interface SilentProgressFile {
     storageLabel?: string;
     speedBytesPerSecond?: number;
     folder?: string | null;
+}
+
+/** 批量任务当前速度：下载进行中用下载速度，否则用 10 秒内新鲜的上传速度。 */
+const BATCH_UPLOAD_SPEED_STALE_MS = 10_000;
+function batchActiveSpeedBytesPerSecond(batch: {
+    downloadProgress?: { speedBytesPerSecond: number };
+    uploadSpeedBytesPerSecond?: number;
+    uploadSpeedUpdatedAt?: number;
+}): number {
+    const downloadSpeed = batch.downloadProgress?.speedBytesPerSecond || 0;
+    if (downloadSpeed > 0) return downloadSpeed;
+    const uploadFresh = (batch.uploadSpeedUpdatedAt || 0) > 0
+        && Date.now() - batch.uploadSpeedUpdatedAt! < BATCH_UPLOAD_SPEED_STALE_MS;
+    return uploadFresh ? (batch.uploadSpeedBytesPerSecond || 0) : 0;
 }
 
 export function buildSilentProgress(
@@ -515,7 +532,7 @@ export function buildSilentProgress(
                 ? `⏸️ **下载已暂停，保留当前进度**`
                 : `🤐 **后台批量处理中**`,
         `${progress} (${completedFiles}/${totalFiles})`,
-        `⚡ ${formatBytes(queuePaused ? 0 : batches.reduce((sum, batch) => sum + (batch.downloadProgress?.speedBytesPerSecond || 0), 0) + singleFiles.reduce((sum, file) => sum + ((file.phase === 'downloading' || file.phase === 'uploading') ? file.speedBytesPerSecond || 0 : 0), 0))}/s`,
+        `⚡ ${formatBytes(queuePaused ? 0 : batches.reduce((sum, batch) => sum + batchActiveSpeedBytesPerSecond(batch), 0) + singleFiles.reduce((sum, file) => sum + ((file.phase === 'downloading' || file.phase === 'uploading') ? file.speedBytesPerSecond || 0 : 0), 0))}/s`,
         ``,
         `✅ 成功: ${successfulFiles}　❌ 失败: ${failedFiles}　⏳ 剩余: ${remainingFiles}`,
         ...Array.from(new Set([...batches.map(batch => batch.storageLabel || batch.providerName), ...singleFiles.map(file => file.storageLabel || file.providerName)].filter(Boolean))).map(label => `📍 存储：${label}`),
@@ -597,6 +614,9 @@ export interface ConsolidatedBatchEntry {
     storageLabel?: string;
     paused?: boolean;
     downloadProgress?: { percent: number; completedBytes: number; totalBytes: number; speedBytesPerSecond: number };
+    /** 写盘阶段的上传速度（批量保存经 rclone --stats 采样）；与下载速度互斥显示。 */
+    uploadSpeedBytesPerSecond?: number;
+    uploadSpeedUpdatedAt?: number;
     savedBytes?: number;
     folderName: string;
     folderPath?: string;
@@ -775,7 +795,7 @@ export async function buildConsolidatedStatus(
                 const progress = telemetry ? generateProgressBar(telemetry.percent, 100) : generateProgressBar(batch.completed, batch.totalFiles);
                 lines.push(`    ${progress} (${batch.completed}/${batch.totalFiles})`);
                 if (batch.paused) lines.push('    已暂停下载，继续后从当前位置恢复');
-                if (telemetry) lines.push(`    ${formatBytes(telemetry.completedBytes)} / ${telemetry.totalBytes ? formatBytes(telemetry.totalBytes) : '—'} ⚡ ${formatBytes(telemetry.speedBytesPerSecond)}/s`);
+                if (telemetry) lines.push(`    ${formatBytes(telemetry.completedBytes)} / ${telemetry.totalBytes ? formatBytes(telemetry.totalBytes) : '—'} ⚡ ${formatBytes(batchActiveSpeedBytesPerSecond(batch))}/s`);
                 if (batch.currentFileActive && batch.currentFileName) {
                     lines.push(`    📄 当前: ${batch.currentFileName}`);
                 }

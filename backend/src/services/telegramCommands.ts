@@ -1841,7 +1841,7 @@ export async function handleRetryFailedTasks(message: Api.Message, args: string[
         await message.reply({ message: `📮 没有找到当前聊天中的失败任务：${unknownSelector}` });
         return;
     }
-    const result = await retryFailedDownloadTasks(limit, taskId, chatId, senderId);
+    const result = await retryFailedDownloadTasks(limit, taskId, chatId, senderId, message.client as TelegramClient);
     await message.reply({ message: result.retried > 0 ? `🔄 已重新加入 ${result.retried} 个失败任务${taskId ? `\n任务: ${taskId}` : ''}` : '📮 最近没有可重试的失败任务' });
 }
 
