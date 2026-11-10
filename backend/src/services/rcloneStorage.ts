@@ -320,6 +320,8 @@ export class RcloneStorageProvider implements IStorageProvider {
             signal?: AbortSignal;
             onProgress?: (transferredBytes: number, totalBytes: number) => void;
             progressTotalBytes?: number;
+            /** 退出码落在里面时不算失败（如 fileExists 的 3/4 表示“不存在”），日志里也不附 error。 */
+            expectedCodes?: number[];
         } = {},
     ): Promise<RcloneRunResult> {
         const configPath = await this.ensureConfigFile();
@@ -361,7 +363,8 @@ export class RcloneStorageProvider implements IStorageProvider {
                 this.logRcloneCall(args[0] ?? '', args, startedAt, null, error instanceof Error ? error.message : String(error));
                 throw new RcloneError(`rclone 启动失败：${error instanceof Error ? error.message : String(error)}`);
             });
-            this.logRcloneCall(args[0] ?? '', args, startedAt, code, stderrTail.toString('utf8'));
+            this.logRcloneCall(args[0] ?? '', args, startedAt, code,
+                options.expectedCodes?.includes(code) ? '' : stderrTail.toString('utf8'));
             return {
                 code,
                 stdout: stdoutTail.toString('utf8'),
@@ -408,7 +411,7 @@ export class RcloneStorageProvider implements IStorageProvider {
         try {
             const result = await this.runRclone(
                 ['lsd', target, '--max-depth', '1', '--low-level-retries', RCLONE_METADATA_LOW_LEVEL_RETRIES],
-                { timeoutMs: 90_000 },
+                { timeoutMs: 90_000, expectedCodes: [3, 4] },
             );
             if (result.code === 0) return;
             if (result.code === 3 || result.code === 4) {
@@ -434,7 +437,7 @@ export class RcloneStorageProvider implements IStorageProvider {
         const storedPath = joinStoredPath(folder, fileName);
         const result = await this.runRclone(
             ['lsjson', '--stat', this.remotePath(storedPath), '--low-level-retries', RCLONE_METADATA_LOW_LEVEL_RETRIES],
-            { timeoutMs: 90_000 },
+            { timeoutMs: 90_000, expectedCodes: [3, 4] },
         );
         if (result.code === 0) return true;
         if (result.code === 3 || result.code === 4) return false;
@@ -558,7 +561,7 @@ export class RcloneStorageProvider implements IStorageProvider {
     async deleteFile(storedPath: string): Promise<void> {
         const result = await this.runRclone(
             ['deletefile', this.remotePath(storedPath), '--low-level-retries', RCLONE_METADATA_LOW_LEVEL_RETRIES],
-            { timeoutMs: 90_000 },
+            { timeoutMs: 90_000, expectedCodes: [3, 4] },
         );
         if (result.code === 0 || result.code === 3 || result.code === 4) return;
         throw new RcloneError(this.describeFailure('删除文件', result.code, result.stderr), result.code);
