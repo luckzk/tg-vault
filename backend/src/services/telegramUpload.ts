@@ -35,6 +35,7 @@ import {
     buildBatchStatus,
     buildConsolidatedStatus,
     type BatchFile,
+    type BatchFileDetail,
     type ConsolidatedUploadFile,
     type ConsolidatedBatchEntry,
 } from '../utils/telegramMessages.js';
@@ -1001,10 +1002,23 @@ function getConsolidatedBatches(chatId: string): ConsolidatedBatchEntry[] {
     const map = chatActiveBatches.get(chatId);
     if (!map) return [];
     return Array.from(map.values(), batch => {
-        const group = batch.groupId ? downloadQueue.getGroup(batch.groupId, {}, true) : undefined;
-        if (!group) return batch;
+        const groupId = batch.groupId;
+        const group = groupId ? downloadQueue.getGroup(groupId, {}, true) : undefined;
+        if (!group || !groupId) return batch;
         const paused = ['paused', 'pausing'].includes(group.state);
-        return { ...batch, paused, downloadProgress: downloadProgressView(group, group.state === 'running', batch.totalFiles > 0 ? batch.completed / batch.totalFiles * 100 : 0) };
+        const files: BatchFileDetail[] = downloadQueue.getGroupTasks(groupId).map(task => ({
+            fileName: task.fileName,
+            status: task.status === 'active' ? 'active'
+                : task.status === 'success' ? 'success'
+                : task.status === 'failed' ? 'failed'
+                : task.status === 'cancelled' ? 'cancelled'
+                : 'pending',
+            phase: task.phase,
+            downloaded: task.downloadedSize,
+            total: task.totalSize,
+            error: task.error,
+        }));
+        return { ...batch, paused, files, downloadProgress: downloadProgressView(group, group.state === 'running', batch.totalFiles > 0 ? batch.completed / batch.totalFiles * 100 : 0) };
     });
 }
 

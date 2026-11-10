@@ -460,6 +460,8 @@ interface SilentProgressBatch {
     /** 写盘阶段的上传速度（批量保存经 rclone --stats 采样）；与下载速度互斥显示。 */
     uploadSpeedBytesPerSecond?: number;
     uploadSpeedUpdatedAt?: number;
+    /** 组内单个文件详情（按创建顺序，来自下载队列；历史只保留最近 50 条已结算任务）。 */
+    files?: BatchFileDetail[];
 }
 
 interface SilentProgressFile {
@@ -485,6 +487,39 @@ function batchActiveSpeedBytesPerSecond(batch: {
     const uploadFresh = (batch.uploadSpeedUpdatedAt || 0) > 0
         && Date.now() - batch.uploadSpeedUpdatedAt! < BATCH_UPLOAD_SPEED_STALE_MS;
     return uploadFresh ? (batch.uploadSpeedBytesPerSecond || 0) : 0;
+}
+
+/** 批量任务内单个文件详情：每文件一行（图标 + 截断文件名 + 状态/进度），超限折叠。 */
+const BATCH_FILE_DETAIL_LIMIT = 10;
+const BATCH_FILE_NAME_LIMIT = 40;
+function truncateFileName(name: string, maxChars = BATCH_FILE_NAME_LIMIT): string {
+    const chars = Array.from(name);
+    return chars.length > maxChars ? `${chars.slice(0, maxChars - 1).join('')}…` : name;
+}
+function batchFileDetailLines(files: BatchFileDetail[] | undefined, limit = BATCH_FILE_DETAIL_LIMIT): string[] {
+    if (!files || files.length === 0) return [];
+    const lines = files.slice(0, limit).map(file => {
+        const name = truncateFileName(file.fileName);
+        switch (file.status) {
+            case 'success':
+                return `    ✅ ${name}${file.total ? ` · ${formatBytes(file.total)}` : ''}`;
+            case 'failed':
+                return `    ❌ ${name}${file.error ? ` · ${truncateFileName(file.error, 30)}` : ' · 失败'}`;
+            case 'cancelled':
+                return `    ⏹️ ${name} · 已取消`;
+            case 'active': {
+                if (file.phase === 'uploading') return `    ⬆️ ${name} · 上传中${file.total ? ` ${formatBytes(file.total)}` : ''}`;
+                if (file.phase === 'saving') return `    💾 ${name} · 保存中`;
+                if (file.phase === 'retrying') return `    🔄 ${name} · 重试中`;
+                if (file.phase === 'waiting_upload' || file.phase === 'waiting_storage') return `    ⏳ ${name} · 等待上传`;
+                return `    ⬇️ ${name} · ${formatBytes(file.downloaded || 0)} / ${file.total ? formatBytes(file.total) : '—'}`;
+            }
+            default:
+                return `    🕒 ${name} · 排队中`;
+        }
+    });
+    if (files.length > limit) lines.push(`    …还有 ${files.length - limit} 个文件`);
+    return lines;
 }
 
 export function buildSilentProgress(
@@ -539,6 +574,7 @@ export function buildSilentProgress(
         ...formatFolderSummary(Array.from(new Set([...batches.map(batch => batch.folderPath), ...singleFiles.map(file => file.folder)].filter((folder): folder is string => folder != null)))),
         ...(currentFile ? [`📄 当前: ${currentFile}`] : []),
         ...(activeBatch ? [`📁 批次: ${activeBatch.folderName}`] : []),
+        ...batchFileDetailLines(activeBatch?.files),
         ...(activeBatch?.queuePending ? [`🕒 队列等待: ${activeBatch.queuePending}`] : []),
         ``,
         ...buildTaskControlLines(taskId, queuePaused || queuePausing, pauseReason, systemPause),
@@ -608,6 +644,15 @@ export interface ConsolidatedUploadFile {
     folder?: string | null;
 }
 
+export interface BatchFileDetail {
+    fileName: string;
+    status: 'pending' | 'active' | 'success' | 'failed' | 'cancelled';
+    phase?: 'downloading' | 'uploading' | 'saving' | 'retrying' | 'waiting_upload' | 'waiting_storage';
+    downloaded?: number;
+    total?: number;
+    error?: string;
+}
+
 export interface ConsolidatedBatchEntry {
     id: string;
     groupId?: string;
@@ -617,6 +662,8 @@ export interface ConsolidatedBatchEntry {
     /** 写盘阶段的上传速度（批量保存经 rclone --stats 采样）；与下载速度互斥显示。 */
     uploadSpeedBytesPerSecond?: number;
     uploadSpeedUpdatedAt?: number;
+    /** 组内单个文件详情（按创建顺序，来自下载队列；历史只保留最近 50 条已结算任务）。 */
+    files?: BatchFileDetail[];
     savedBytes?: number;
     folderName: string;
     folderPath?: string;
@@ -810,6 +857,7 @@ export async function buildConsolidatedStatus(
             lines.push(`    📁 保存目录：${batch.folderPath ?? '正在确定保存目录'}`);
             if (batch.groupId) lines.push(`    🆔 任务：${batch.groupId}`);
             if (!isDone) lines.push(`    成功 ${batch.successful} · 失败 ${batch.failed} · 剩余 ${Math.max(0, batch.totalFiles - batch.completed)}`);
+            if (!isDone) lines.push(...batchFileDetailLines(batch.files));
         });
     }
 

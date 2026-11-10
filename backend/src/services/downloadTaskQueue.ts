@@ -352,6 +352,14 @@ export class DownloadTaskQueue {
     }
 
     /** Includes terminal state while the final persistence notification is in flight. */
+    /** 某组的全部任务（待处理 + 进行中 + 最近已结算），按创建顺序排列。 */
+    getGroupTasks(groupId: string): DownloadFileTaskSnapshot[] {
+        const tasks = [...this.queue, ...this.active, ...this.history].filter(task => task.groupId === groupId);
+        // 任务 id 为 `${Date.now()}-${随机}`，字典序即创建顺序；重跑的任务会排到末尾。
+        tasks.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+        return tasks.map(task => this.publicTask(task));
+    }
+
     getGroupSnapshot(groupId: string, scope: DownloadTaskScope = {}, includeHidden = false): DownloadTaskGroupSnapshot | undefined {
         const exact = this.groups.get(groupId);
         const matches = (exact ? [exact] : this.findGroupMatches(groupId))
