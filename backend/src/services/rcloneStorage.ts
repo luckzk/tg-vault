@@ -50,6 +50,13 @@ const STDERR_TAIL_BYTES = 64 * 1024;
  */
 const RCLONE_PACING_ARGS = ['--tpslimit', '2', '--tpslimit-burst', '1', '--retries', '3', '--retries-sleep', '5s'];
 
+/**
+ * 已确认存在的远端目录（mkdir 成功后记入，1 小时内同一目录的上传不再重复 mkdir）。
+ * 每个账户一个 provider 实例，key 用完整远端路径即可。进程重启后缓存清空，
+ * 首个上传仍会 mkdir；目录若在 Drime 网页端被删，1 小时后自动恢复 mkdir。
+ */
+const CONFIRMED_DIRECTORY_TTL_MS = 3_600_000;
+
 export function normalizeRcloneConfig(input: unknown): RcloneStorageConfig {
     if (!input || typeof input !== 'object' || Array.isArray(input)) {
         throw new Error('Rclone 配置须为对象');
@@ -170,6 +177,7 @@ export class RcloneStorageProvider implements IStorageProvider {
     private readonly config: RcloneStorageConfig;
     private configPath: string | null = null;
     private configMaterialized = false;
+    private readonly confirmedDirectories = new Map<string, number>();
 
     constructor(
         public id: string,
@@ -312,10 +320,14 @@ export class RcloneStorageProvider implements IStorageProvider {
     private async ensureRemoteDirectory(storedPath: string): Promise<void> {
         const dir = this.remoteDirPath(storedPath);
         if (!dir) return;
+        // 每次上传都 mkdir 是纯浪费：同一目录 1 小时内只确认一次。
+        const confirmedAt = this.confirmedDirectories.get(dir);
+        if (confirmedAt !== undefined && Date.now() - confirmedAt < CONFIRMED_DIRECTORY_TTL_MS) return;
         const result = await this.runRclone(['mkdir', dir, '--low-level-retries', '1'], { timeoutMs: 90_000 });
         if (result.code !== 0) {
             throw new RcloneError(this.describeFailure('创建远端目录', result.code, result.stderr), result.code);
         }
+        this.confirmedDirectories.set(dir, Date.now());
     }
 
     async probe(): Promise<void> {
