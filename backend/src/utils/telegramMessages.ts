@@ -522,6 +522,25 @@ function batchFileDetailLines(files: BatchFileDetail[] | undefined, limit = BATC
     return lines;
 }
 
+/** 静默消息的批次区：进行中的批次逐个展开（名 + 计数 + 失败数 + 文件详情），已完成的只留一行。 */
+const SILENT_BATCH_FILE_LINE_BUDGET = 16;
+function buildSilentBatchSections(batches: SilentProgressBatch[]): string[] {
+    const lines: string[] = [];
+    let budget = SILENT_BATCH_FILE_LINE_BUDGET;
+    for (const batch of batches) {
+        if (batch.completed >= batch.totalFiles) {
+            lines.push(`✅ ${batch.folderName} (${batch.completed}/${batch.totalFiles})`);
+            continue;
+        }
+        lines.push(`📁 ${batch.folderName} (${batch.completed}/${batch.totalFiles}${batch.failed > 0 ? ` · ❌ ${batch.failed}` : ''})`);
+        if (budget <= 0) continue;
+        const limit = Math.min(BATCH_FILE_DETAIL_LIMIT, budget);
+        lines.push(...batchFileDetailLines(batch.files, limit));
+        budget -= Math.min(batch.files?.length || 0, limit);
+    }
+    return lines;
+}
+
 export function buildSilentProgress(
     sessionTotal: number,
     batches: SilentProgressBatch[],
@@ -573,8 +592,7 @@ export function buildSilentProgress(
         ...Array.from(new Set([...batches.map(batch => batch.storageLabel || batch.providerName), ...singleFiles.map(file => file.storageLabel || file.providerName)].filter(Boolean))).map(label => `📍 存储：${label}`),
         ...formatFolderSummary(Array.from(new Set([...batches.map(batch => batch.folderPath), ...singleFiles.map(file => file.folder)].filter((folder): folder is string => folder != null)))),
         ...(currentFile ? [`📄 当前: ${currentFile}`] : []),
-        ...(activeBatch ? [`📁 批次: ${activeBatch.folderName}`] : []),
-        ...batchFileDetailLines(activeBatch?.files),
+        ...buildSilentBatchSections(batches),
         ...(activeBatch?.queuePending ? [`🕒 队列等待: ${activeBatch.queuePending}`] : []),
         ``,
         ...buildTaskControlLines(taskId, queuePaused || queuePausing, pauseReason, systemPause),

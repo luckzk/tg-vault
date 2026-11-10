@@ -1428,12 +1428,14 @@ export async function retryFailedDownloadTasks(limit = 10, taskId?: string, chat
     const receipt = taskId && userId !== undefined ? await getTaskReceipt(taskId, userId) : null;
     // 重试任务结算后刷新状态消息：重试直接重跑队列任务，发生在批次处理器之外，
     // 处理器早已结束，无人更新批次计数与消息；靠结算钩子补上。
-    const hookRetryResult = (result: { retried: number; groupIds: string[]; tasks: { groupId: string; fileName: string }[]; settled: Promise<PromiseSettledResult<void>[]> }) => {
+    // taskGroupIds 为任务的全部组（凭据里的 groupIds）：定稿改消息时按它汇总，
+    // 多组也不会失真；不传时只改单组定稿。
+    const hookRetryResult = (result: { retried: number; groupIds: string[]; tasks: { groupId: string; fileName: string }[]; settled: Promise<PromiseSettledResult<void>[]> }, taskGroupIds?: string[]) => {
         if (result.retried > 0 && client) {
             void (async () => {
                 try {
                     await result.settled;
-                    await refreshRetriedGroups(result.groupIds, result.tasks, taskId, client);
+                    await refreshRetriedGroups(result.groupIds, result.tasks, taskId, client, taskGroupIds);
                 } catch (error) {
                     console.error('[TG][retry] refresh failed:', error);
                 }
@@ -1450,7 +1452,7 @@ export async function retryFailedDownloadTasks(limit = 10, taskId?: string, chat
         }
         for (const groupId of receipt.groupIds) {
             if (retried >= limit) break;
-            retried += hookRetryResult(await downloadQueue.retryFailed(limit - retried, { chatId, userId }, groupId));
+            retried += hookRetryResult(await downloadQueue.retryFailed(limit - retried, { chatId, userId }, groupId), receipt.groupIds);
         }
         return { retried };
     }
@@ -1461,13 +1463,15 @@ export async function retryFailedDownloadTasks(limit = 10, taskId?: string, chat
 /**
  * 重试任务结算后刷新状态：按队列组快照重算批次计数，并把静默会话的高水位失败数
  * 按实际成功数扣减（会话失败数只增不减，不扣减消息永远显示旧失败数），最后刷新消息。
- * 会话已定稿时直接改定稿消息（仅单组，避免多组总数失真）。
+ * 会话已定稿时直接改定稿消息：有任务全部组快照时按它汇总（多组也不失真），
+ * 否则仅单组重试改定稿消息，多组时跳过。
  */
 async function refreshRetriedGroups(
     groupIds: string[],
     tasks: { groupId: string; fileName: string }[],
     taskId: string | undefined,
     client: TelegramClient,
+    taskGroupIds?: string[],
 ) {
     const history = downloadQueue.getDetailedStatus().history;
     const succeededByGroup = new Map<string, number>();
@@ -1505,23 +1509,32 @@ async function refreshRetriedGroups(
             await finalizeSilentSessionIfDone(client, chatIdStr);
             continue;
         }
-        // 会话已定稿：完成消息 ID 有失败时会被保留，单组重试直接改定稿消息。
+        // 会话已定稿：完成消息 ID 有失败时会被保留，直接改定稿消息。
+        // 按任务的全部组快照汇总（凭据里的 groupIds 即会话全部组，多组也不失真）；
+        // 没有任务组清单时只改单组定稿，多组跳过。
         const retainedMsgId = silentNoticeMessageIdMap.get(chatIdStr);
-        if (retainedMsgId && groupIds.length === 1) {
-            const snap = downloadQueue.getGroupSnapshot(groupIds[0], {}, true);
-            if (snap && snap.chatId === chatIdStr) {
-                const total = snap.total;
-                const failed = snap.failed + snap.cancelled;
-                const completed = snap.completed + snap.failed + snap.cancelled;
-                const text = buildSilentAllTasksComplete(total, failed, taskId, [], [{
+        const editGroups = taskGroupIds?.length ? taskGroupIds : (groupIds.length === 1 ? groupIds : undefined);
+        if (retainedMsgId && editGroups) {
+            const snaps: NonNullable<ReturnType<typeof downloadQueue.getGroupSnapshot>>[] = [];
+            for (const id of editGroups) {
+                const snap = downloadQueue.getGroupSnapshot(id, {}, true);
+                if (!snap || snap.chatId !== chatIdStr) { snaps.length = 0; break; }
+                snaps.push(snap);
+            }
+            if (snaps.length === editGroups.length) {
+                const total = snaps.reduce((sum, snap) => sum + snap.total, 0);
+                const failed = snaps.reduce((sum, snap) => sum + snap.failed + snap.cancelled, 0);
+                const completed = snaps.reduce((sum, snap) => sum + snap.completed + snap.failed + snap.cancelled, 0);
+                const successful = snaps.reduce((sum, snap) => sum + snap.completed, 0);
+                const text = buildSilentAllTasksComplete(total, failed, taskId, [], snaps.map(snap => ({
                     folderName: snap.title || 'telegram',
                     folderPath: snap.targetFolder || undefined,
-                    totalFiles: total,
-                    completed,
+                    totalFiles: snap.total,
+                    completed: snap.completed + snap.failed + snap.cancelled,
                     successful: snap.completed,
-                    failed,
+                    failed: snap.failed + snap.cancelled,
                     providerName: snap.targetProvider,
-                }]);
+                })));
                 const buttons = failed > 0 && taskId
                     ? (() => { const b = buildTaskControlButtons(taskId, false, undefined, false, false, failed); if (b) b.rows = b.rows.slice(1); return b; })()
                     : undefined;
