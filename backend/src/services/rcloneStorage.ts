@@ -51,6 +51,13 @@ const STDERR_TAIL_BYTES = 64 * 1024;
 const RCLONE_PACING_ARGS = ['--tpslimit', '2', '--tpslimit-burst', '1', '--retries', '3', '--retries-sleep', '5s'];
 
 /**
+ * 元数据类调用（lsjson/size/mkdir/deletefile 等）的低层级重试次数。rclone 的
+ * --retries 3 对 lsjson 这类命令不生效（实测 429 时 1.2 秒就退出），只能靠低层级
+ * 重试 + pacer 退避把短暂的桶空扛过去；与 rcat 的 10 次对齐。
+ */
+const RCLONE_METADATA_LOW_LEVEL_RETRIES = '10';
+
+/**
  * 已确认存在的远端目录（mkdir 成功后记入，1 小时内同一目录的上传不再重复 mkdir）。
  * 每个账户一个 provider 实例，key 用完整远端路径即可。进程重启后缓存清空，
  * 首个上传仍会 mkdir；目录若在 Drime 网页端被删，1 小时后自动恢复 mkdir。
@@ -181,6 +188,21 @@ export class RcloneStorageProvider implements IStorageProvider {
     /** 流式上传互斥：同一账户同一时间只跑一个 rcat，避免相册多文件并发时每个进程各 2 次/秒叠加冲垮 Drime 的突发限流。 */
     private uploadSlot: Promise<void> = Promise.resolve();
 
+    /** 进程级 rclone 启动节流：--tpslimit 只在单个进程内生效，多个短命进程各自 2 次/秒，
+     *  叠加起来照样 429。这里保证任意两个 rclone 进程的启动间隔 ≥500ms。 */
+    private static lastRcloneStartMs = 0;
+    private static rcloneStartQueue: Promise<void> = Promise.resolve();
+
+    private static async throttleRcloneStart(): Promise<void> {
+        const run = RcloneStorageProvider.rcloneStartQueue.then(async () => {
+            const wait = 500 - (Date.now() - RcloneStorageProvider.lastRcloneStartMs);
+            if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+            RcloneStorageProvider.lastRcloneStartMs = Date.now();
+        });
+        RcloneStorageProvider.rcloneStartQueue = run.catch(() => undefined);
+        await run;
+    }
+
     /**
      * 排队等一个流式上传空位；返回的 release 必须在流结束（finish/abort）时调用，
      * 哪怕失败也要放行，否则后续上传会永远卡住。
@@ -247,6 +269,15 @@ export class RcloneStorageProvider implements IStorageProvider {
         await fs.promises.mkdir(dir, { recursive: true, mode: 0o700 });
         await fs.promises.chmod(dir, 0o700).catch(() => undefined);
         const target = path.join(dir, `${this.id}.conf`);
+        // rclone 会在首次使用时把发现的 root_folder_id 写回配置文件；后端重启会
+        // 重建 provider 实例，若每次都按库里配置重写，就会丢掉这个值，导致每次
+        // 调用都多花请求重新发现根目录。token 没变就把旧文件的 root_folder_id 留下来。
+        const existing = await fs.promises.readFile(target, 'utf8').catch(() => null);
+        if (existing && this.config.mode === 'drime' && this.config.accessToken && !this.config.rootFolderId) {
+            const token = /^\s*access_token\s*=\s*(\S+)\s*$/m.exec(existing)?.[1];
+            const rootId = /^\s*root_folder_id\s*=\s*(\S+)\s*$/m.exec(existing)?.[1];
+            if (token === this.config.accessToken && rootId) this.config.rootFolderId = rootId;
+        }
         const temp = path.join(dir, `.${this.id}.${crypto.randomUUID()}.tmp`);
         const handle = await fs.promises.open(temp, 'w', 0o600);
         try {
@@ -293,6 +324,7 @@ export class RcloneStorageProvider implements IStorageProvider {
     ): Promise<RcloneRunResult> {
         const configPath = await this.ensureConfigFile();
         options.signal?.throwIfAborted();
+        await RcloneStorageProvider.throttleRcloneStart();
         const startedAt = Date.now();
         const child: ChildProcess = spawn(
             'rclone', ['--config', configPath, ...RCLONE_PACING_ARGS, ...args],
@@ -363,7 +395,7 @@ export class RcloneStorageProvider implements IStorageProvider {
         // 每次上传都 mkdir 是纯浪费：同一目录 1 小时内只确认一次。
         const confirmedAt = this.confirmedDirectories.get(dir);
         if (confirmedAt !== undefined && Date.now() - confirmedAt < CONFIRMED_DIRECTORY_TTL_MS) return;
-        const result = await this.runRclone(['mkdir', dir, '--low-level-retries', '1'], { timeoutMs: 90_000 });
+        const result = await this.runRclone(['mkdir', dir, '--low-level-retries', RCLONE_METADATA_LOW_LEVEL_RETRIES], { timeoutMs: 90_000 });
         if (result.code !== 0) {
             throw new RcloneError(this.describeFailure('创建远端目录', result.code, result.stderr), result.code);
         }
@@ -375,7 +407,7 @@ export class RcloneStorageProvider implements IStorageProvider {
         const target = `${this.config.remoteName}:${base}`;
         try {
             const result = await this.runRclone(
-                ['lsd', target, '--max-depth', '1', '--low-level-retries', '1'],
+                ['lsd', target, '--max-depth', '1', '--low-level-retries', RCLONE_METADATA_LOW_LEVEL_RETRIES],
                 { timeoutMs: 90_000 },
             );
             if (result.code === 0) return;
@@ -384,7 +416,7 @@ export class RcloneStorageProvider implements IStorageProvider {
                 // it). Fall back to the remote root: reachable root means the
                 // credentials work; a missing base is not an auth failure.
                 const root = await this.runRclone(
-                    ['lsd', `${this.config.remoteName}:`, '--max-depth', '1', '--low-level-retries', '1'],
+                    ['lsd', `${this.config.remoteName}:`, '--max-depth', '1', '--low-level-retries', RCLONE_METADATA_LOW_LEVEL_RETRIES],
                     { timeoutMs: 90_000 },
                 );
                 if (root.code === 0) return;
@@ -401,7 +433,7 @@ export class RcloneStorageProvider implements IStorageProvider {
     async fileExists(fileName: string, folder?: string | null): Promise<boolean> {
         const storedPath = joinStoredPath(folder, fileName);
         const result = await this.runRclone(
-            ['lsjson', '--stat', this.remotePath(storedPath), '--low-level-retries', '1'],
+            ['lsjson', '--stat', this.remotePath(storedPath), '--low-level-retries', RCLONE_METADATA_LOW_LEVEL_RETRIES],
             { timeoutMs: 90_000 },
         );
         if (result.code === 0) return true;
@@ -469,6 +501,7 @@ export class RcloneStorageProvider implements IStorageProvider {
                 const chunkMiB = rcloneDrimeChunkSizeMiB(totalBytes);
                 args.push('--drime-chunk-size', `${chunkMiB}Mi`, '--drime-upload-concurrency', '2');
             }
+            await RcloneStorageProvider.throttleRcloneStart();
             const child: ChildProcessWithoutNullStreams = spawn('rclone', args, { stdio: ['pipe', 'pipe', 'pipe'] });
             return new RcloneUploadStream(this, child, storedPath, tempStoredPath, totalBytes, options.signal, args, releaseUploadSlot);
         } catch (error) {
@@ -488,6 +521,7 @@ export class RcloneStorageProvider implements IStorageProvider {
             args.push('--offset', String(range.offset));
             if (range.count !== undefined) args.push('--count', String(range.count));
         }
+        await RcloneStorageProvider.throttleRcloneStart();
         const child: ChildProcess = spawn('rclone', args, { stdio: ['ignore', 'pipe', 'pipe'] });
         let stderrTail: Buffer = Buffer.alloc(0);
         let settled = false;
@@ -523,7 +557,7 @@ export class RcloneStorageProvider implements IStorageProvider {
 
     async deleteFile(storedPath: string): Promise<void> {
         const result = await this.runRclone(
-            ['deletefile', this.remotePath(storedPath), '--low-level-retries', '1'],
+            ['deletefile', this.remotePath(storedPath), '--low-level-retries', RCLONE_METADATA_LOW_LEVEL_RETRIES],
             { timeoutMs: 90_000 },
         );
         if (result.code === 0 || result.code === 3 || result.code === 4) return;
@@ -533,7 +567,7 @@ export class RcloneStorageProvider implements IStorageProvider {
     async getFileSize(storedPath: string): Promise<number> {
         const remote = this.remotePath(storedPath);
         const result = await this.runRclone(
-            ['size', remote, '--json', '--low-level-retries', '1'],
+            ['size', remote, '--json', '--low-level-retries', RCLONE_METADATA_LOW_LEVEL_RETRIES],
             { timeoutMs: 90_000 },
         );
         if (result.code === 0) {
@@ -550,7 +584,7 @@ export class RcloneStorageProvider implements IStorageProvider {
         const base = this.config.basePath === '/' ? '' : this.config.basePath.slice(1);
         const parentRemote = parent ? `${this.config.remoteName}:${base ? `${base}/${parent}` : parent}` : `${this.config.remoteName}:${base}`;
         const listed = await this.runRclone(
-            ['lsjson', parentRemote, '--files-only', '--max-depth', '1', '--low-level-retries', '1'],
+            ['lsjson', parentRemote, '--files-only', '--max-depth', '1', '--low-level-retries', RCLONE_METADATA_LOW_LEVEL_RETRIES],
             { timeoutMs: 90_000 },
         );
         if (listed.code !== 0) {
