@@ -552,6 +552,7 @@ export function buildSilentProgress(
     pauseReason?: string,
     queuePausing = false,
     systemPause?: TaskSystemPauseView,
+    options?: { retrying?: boolean },
 ): string {
     const totalBatchFiles = batches.reduce((sum, batch) => sum + batch.totalFiles, 0);
     const completedBatchFiles = batches.reduce((sum, batch) => sum + batch.completed, 0);
@@ -584,7 +585,9 @@ export function buildSilentProgress(
             ? (systemPause ? `⏸️ **系统保护暂停**` : `⏸️ **后台下载已暂停**`)
             : queuePausing
                 ? `⏸️ **下载已暂停，保留当前进度**`
-                : `🤐 **后台批量处理中**`,
+                : options?.retrying
+                    ? `🔄 **正在重试失败任务**`
+                    : `🤐 **后台批量处理中**`,
         `${progress} (${completedFiles}/${totalFiles})`,
         `⚡ ${formatBytes(queuePaused ? 0 : batches.reduce((sum, batch) => sum + batchActiveSpeedBytesPerSecond(batch), 0) + singleFiles.reduce((sum, file) => sum + ((file.phase === 'downloading' || file.phase === 'uploading') ? file.speedBytesPerSecond || 0 : 0), 0))}/s`,
         ``,

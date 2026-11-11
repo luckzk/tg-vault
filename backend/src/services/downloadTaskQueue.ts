@@ -17,6 +17,8 @@ export interface DownloadTaskGroupInput {
     chatId: string;
     userId?: number;
     source?: string;
+    /** 批次条目 ID（媒体组 id / 频道分段 batchId）：重试时按它把批次条目重新注册回来，让重试进度能写进条目。 */
+    batchId?: string;
     targetProvider?: string;
     targetAccountId?: string | null;
     targetFolder?: string | null;

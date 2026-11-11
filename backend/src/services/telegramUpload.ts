@@ -1424,6 +1424,71 @@ export function listFailedDownloadTaskDetails(taskId: string, chatId: string, us
     return [...files, ...batches];
 }
 
+/**
+ * 重试进行中的进度刷新：重试直接重跑队列任务，发生在批次处理器之外，
+ * 处理器早已结束，无人刷新消息——此前重试全程无进度，卡一会才突然变成功。
+ * 这里做两件事：
+ * 1) 把批次条目按组快照里的原 batchId 重新注册回来：重试任务的 updateBatch
+ *    仍写原 batchId，条目回来后上传速度、当前文件等进度又能写进条目；
+ * 2) 每 3 秒刷一次消息：会话还在就刷静默进度卡；会话已定稿就把定稿消息
+ *    改成“正在重试失败任务”的进度版。全部重跑任务结算后自动停；
+ *    结算钩子的最终刷新会覆盖成定稿结果。
+ */
+function startRetryProgress(groupIds: string[], taskId: string | undefined, client: TelegramClient): void {
+    const chatIds = new Set<string>();
+    for (const groupId of groupIds) {
+        const snap = downloadQueue.getGroupSnapshot(groupId, {}, true);
+        if (!snap?.chatId) continue;
+        const chatIdStr = snap.chatId;
+        chatIds.add(chatIdStr);
+        if (snap.batchId) {
+            registerBatch(chatIdStr, snap.batchId, {
+                id: snap.batchId,
+                groupId,
+                folderName: snap.title || 'telegram',
+                folderPath: snap.targetFolder || undefined,
+                totalFiles: snap.total,
+                completed: snap.completed + snap.failed + snap.cancelled,
+                successful: snap.completed,
+                failed: snap.failed + snap.cancelled,
+                providerName: snap.targetProvider,
+                queuePending: 0,
+            });
+        }
+    }
+    if (chatIds.size === 0) return;
+    let stopped = false;
+    let timer: ReturnType<typeof setInterval> | undefined;
+    const tick = async () => {
+        if (stopped) return;
+        // 全部重跑任务都结算了就停，剩下的最终刷新交给结算钩子。
+        const allDone = groupIds.every(groupId => {
+            const snap = downloadQueue.getGroupSnapshot(groupId, {}, true);
+            return !snap || (snap.active === 0 && snap.pending === 0);
+        });
+        if (allDone) { stopped = true; if (timer) clearInterval(timer); return; }
+        for (const chatIdStr of chatIds) {
+            if (stopped) return;
+            if (silentSessionMap.has(chatIdStr)) {
+                await refreshSilentProgress(client, chatIdStr);
+                continue;
+            }
+            const retainedMsgId = silentNoticeMessageIdMap.get(chatIdStr);
+            if (!retainedMsgId) continue;
+            const batches = getConsolidatedBatches(chatIdStr).filter(batch => batch.groupId && groupIds.includes(batch.groupId));
+            if (batches.length === 0 || stopped) continue;
+            const total = batches.reduce((sum, batch) => sum + batch.totalFiles, 0);
+            const completed = batches.reduce((sum, batch) => sum + batch.completed, 0);
+            const failed = batches.reduce((sum, batch) => sum + batch.failed, 0);
+            const text = buildSilentProgress(total, batches, [], completed, failed, taskId, false, undefined, false, undefined, { retrying: true });
+            if (stopped) continue;
+            await safeEditMessage(client, chatIdStr, { message: retainedMsgId, text });
+        }
+    };
+    void tick();
+    timer = setInterval(() => { void tick(); }, 3000);
+}
+
 export async function retryFailedDownloadTasks(limit = 10, taskId?: string, chatId?: string, userId?: number, client?: TelegramClient) {
     const receipt = taskId && userId !== undefined ? await getTaskReceipt(taskId, userId) : null;
     // 重试任务结算后刷新状态消息：重试直接重跑队列任务，发生在批次处理器之外，
@@ -1446,18 +1511,28 @@ export async function retryFailedDownloadTasks(limit = 10, taskId?: string, chat
     if (receipt) {
         if (chatId !== receipt.chatId) return { retried: 0 };
         let retried = 0;
+        const retriedGroupIds = new Set<string>();
         for (const jobId of receipt.jobIds) {
             const result = await retryTelegramBackgroundJob(receipt.userId, jobId, receipt.chatId);
             retried += Number(result?.retried || 0);
         }
         for (const groupId of receipt.groupIds) {
             if (retried >= limit) break;
-            retried += hookRetryResult(await downloadQueue.retryFailed(limit - retried, { chatId, userId }, groupId), receipt.groupIds);
+            const result = await downloadQueue.retryFailed(limit - retried, { chatId, userId }, groupId);
+            result.groupIds.forEach(id => retriedGroupIds.add(id));
+            retried += hookRetryResult(result, receipt.groupIds);
+        }
+        if (retried > 0 && client && retriedGroupIds.size > 0) {
+            startRetryProgress([...retriedGroupIds], taskId, client);
         }
         return { retried };
     }
     const result = await downloadQueue.retryFailed(limit, { chatId, userId }, taskId);
-    return { retried: hookRetryResult(result) };
+    const retried = hookRetryResult(result);
+    if (retried > 0 && client && result.groupIds.length > 0) {
+        startRetryProgress(result.groupIds, taskId, client);
+    }
+    return { retried };
 }
 
 /**
@@ -1496,6 +1571,12 @@ async function refreshRetriedGroups(
         batches?.forEach((entry, id) => { if (entry.groupId === groupId) batchId = id; });
         if (batchId) {
             updateBatch(chatIdStr, batchId, { completed, successful: snap.completed, failed, queuePending: 0 });
+            // 重试跑完就把临时注册回来的条目清掉（与处理器结束 8 秒后清条目一致），
+            // 否则它会一直占着批次位、影响后续会话的完成判断。
+            if (completed >= snap.total) {
+                const doneBatchId = batchId;
+                setTimeout(() => removeBatch(chatIdStr, doneBatchId), 8000);
+            }
         }
         // 先更新批次条目再扣减会话失败数（刷新时取 max，顺序反了会把旧值顶回来）。
         const session = silentSessionMap.get(chatIdStr);
@@ -2495,6 +2576,7 @@ async function processBatchUploadSnapshot(client: TelegramClient | undefined, qu
             targetAccountId: queue.storageTarget.accountId,
             targetFolder: storageFolder,
             expectedTotal: snapshot.length,
+            batchId,
         });
         const folderPreview = storageFolder;
         updateBatch(chatId.toString(), batchId, { folderName: queue.folderName, folderPath: folderPreview || '/', storageLabel });
@@ -2833,6 +2915,7 @@ export async function downloadTelegramChannelRange(
         chatId: chatIdStr,
         hidden: true,
         expectedTotal: downloadableRefs.length,
+        batchId,
     });
     if (downloadableRefs.length > 0) {
         const firstRef = downloadableRefs[0];
